@@ -51,6 +51,7 @@ class EpisodeController extends Controller
             'description' => 'nullable|string',
             'thumbnail' => 'nullable|string|max:500',
             'cloudflare_video_uid' => 'nullable|string|max:255',
+            'magnet_url' => 'nullable|string',
             'duration' => 'nullable|integer|min:0',
             'release_date' => 'nullable|date',
             'is_published' => 'nullable|boolean',
@@ -67,19 +68,43 @@ class EpisodeController extends Controller
             ], 400);
         }
 
+        $magnetUrl = $validated['magnet_url'] ?? null;
+        unset($validated['magnet_url']);
+
         $validated['season_id'] = $seasonId;
         $validated['is_published'] = $validated['is_published'] ?? false;
         $validated['view_count'] = 0;
 
-        // Generate placeholder Cloudflare UID if not provided
+        // If magnet URL is provided, initiate upload in background
+        if ($magnetUrl) {
+            $torrentService = app(\App\Services\TorrentToStreamService::class);
+
+            $result = $torrentService->uploadFromMagnet($magnetUrl, [
+                'name' => $validated['title'],
+            ]);
+
+            if ($result['success']) {
+                // Store transfer ID temporarily (will be updated by background job with actual UID)
+                $validated['cloudflare_video_uid'] = 'processing_transfer_' . $result['transfer_id'];
+            } else {
+                return response()->json([
+                    'message' => 'Failed to initiate episode upload',
+                    'error' => $result['message'] ?? 'Unknown error',
+                ], 500);
+            }
+        }
+
+        // Require either cloudflare_video_uid or magnet_url
         if (empty($validated['cloudflare_video_uid'])) {
-            $validated['cloudflare_video_uid'] = 'episode_placeholder_' . uniqid();
+            return response()->json([
+                'message' => 'Either cloudflare_video_uid or magnet_url is required',
+            ], 400);
         }
 
         $episode = Episode::create($validated);
 
         return response()->json([
-            'message' => 'Episode created successfully',
+            'message' => 'Episode created successfully' . ($magnetUrl ? '. Upload processing in background.' : ''),
             'episode' => $episode,
         ], 201);
     }
