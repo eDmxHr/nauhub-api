@@ -35,4 +35,14 @@ return [
         ],
     ],
 
+    'cloudflare' => [
+        'account_id' => env('CLOUDFLARE_ACCOUNT_ID'),
+        'api_token' => env('CLOUDFLARE_API_TOKEN'),
+        'customer_subdomain' => env('CLOUDFLARE_CUSTOMER_SUBDOMAIN'),
+    ],
+
+    'putio' => [
+        'api_token' => env('PUTIO_API_TOKEN'),
+    ],
+
 ];

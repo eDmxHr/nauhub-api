@@ -19,7 +19,7 @@ return new class extends Migration
       $table->foreignId('user_id')->constrained()->onDelete('cascade');
 
       // Plan details
-      $table->enum('plan_type', ['monthly', 'quarterly', 'yearly']); // Subscription duration
+      $table->enum('plan_type', ['monthly', 'annual']); // Subscription duration
       $table->decimal('amount', 10, 2); // Amount paid
       $table->string('currency')->default('MVR');
 

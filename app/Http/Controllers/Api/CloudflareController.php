@@ -1,0 +1,482 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Jobs\UploadVideoFromPutio;
+use App\Services\CloudflareStreamService;
+use App\Services\PutioService;
+use Illuminate\Http\Request;
+
+class CloudflareController extends Controller
+{
+    protected $cloudflare;
+    protected $putio;
+
+    public function __construct(CloudflareStreamService $cloudflare, PutioService $putio)
+    {
+        $this->cloudflare = $cloudflare;
+        $this->putio = $putio;
+    }
+
+    /**
+     * Test Cloudflare Stream connection.
+     */
+    public function testConnection()
+    {
+        if (!$this->cloudflare->isConfigured()) {
+            return response()->json([
+                'message' => 'Cloudflare Stream is not configured',
+                'configured' => false,
+                'details' => [
+                    'account_id' => config('services.cloudflare.account_id') ? 'Set' : 'Missing',
+                    'api_token' => config('services.cloudflare.api_token') ? 'Set' : 'Missing',
+                    'customer_subdomain' => config('services.cloudflare.customer_subdomain') ? 'Set' : 'Missing',
+                ],
+            ], 200);
+        }
+
+        return response()->json([
+            'message' => 'Cloudflare Stream is configured and ready',
+            'configured' => true,
+            'details' => [
+                'account_id' => 'Set',
+                'api_token' => 'Set',
+                'customer_subdomain' => config('services.cloudflare.customer_subdomain'),
+                'base_url' => "https://api.cloudflare.com/client/v4/accounts/" . config('services.cloudflare.account_id') . "/stream",
+            ],
+        ]);
+    }
+
+    /**
+     * Upload a video file to Cloudflare Stream (Admin only).
+     */
+    public function uploadVideo(Request $request)
+    {
+        $validated = $request->validate([
+            'video_file' => 'required|file|mimes:mp4,mov,avi,mkv,webm|max:5242880', // 5GB max
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+        ]);
+
+        $metadata = [
+            'name' => $validated['title'],
+            'requireSignedURLs' => false,
+        ];
+
+        if (isset($validated['description'])) {
+            $metadata['description'] = $validated['description'];
+        }
+
+        $result = $this->cloudflare->uploadVideo($request->file('video_file'), $metadata);
+
+        if ($result) {
+            return response()->json([
+                'message' => 'Video uploaded successfully',
+                'video' => [
+                    'uid' => $result['uid'],
+                    'status' => $result['status']['state'] ?? 'unknown',
+                    'ready' => $result['readyToStream'] ?? false,
+                    'stream_url' => $this->cloudflare->getStreamUrl($result['uid']),
+                    'thumbnail' => $this->cloudflare->getThumbnailUrl($result['uid']),
+                    'embed_url' => $this->cloudflare->getEmbedUrl($result['uid']),
+                ],
+            ], 201);
+        }
+
+        return response()->json([
+            'message' => 'Failed to upload video',
+        ], 500);
+    }
+
+    /**
+     * Upload video from URL (e.g., Put.io) (Admin only).
+     */
+    public function uploadFromUrl(Request $request)
+    {
+        $validated = $request->validate([
+            'video_url' => 'required|url',
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+        ]);
+
+        $metadata = [
+            'name' => $validated['title'],
+            'requireSignedURLs' => false,
+        ];
+
+        if (isset($validated['description'])) {
+            $metadata['description'] = $validated['description'];
+        }
+
+        $result = $this->cloudflare->uploadFromUrl($validated['video_url'], $metadata);
+
+        if ($result) {
+            return response()->json([
+                'message' => 'Video upload initiated from URL',
+                'video' => [
+                    'uid' => $result['uid'],
+                    'status' => $result['status']['state'] ?? 'processing',
+                    'ready' => $result['readyToStream'] ?? false,
+                    'stream_url' => $this->cloudflare->getStreamUrl($result['uid']),
+                    'thumbnail' => $this->cloudflare->getThumbnailUrl($result['uid']),
+                ],
+            ], 201);
+        }
+
+        return response()->json([
+            'message' => 'Failed to upload video from URL',
+        ], 500);
+    }
+
+    /**
+     * Upload video from magnet link via Put.io (Admin only) - Fully Automated
+     *
+     * Workflow (all automated in background):
+     * 1. Add magnet link to Put.io
+     * 2. Dispatch background job that waits for download
+     * 3. Job uploads to Cloudflare when ready
+     * 4. Returns immediately with transfer ID
+     */
+    public function uploadFromMagnet(Request $request)
+    {
+        $validated = $request->validate([
+            'magnet_url' => 'required|string',
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+        ]);
+
+        // Step 1: Add transfer to Put.io
+        $transferResult = $this->putio->addTransfer($validated['magnet_url']);
+
+        if (!$transferResult['success']) {
+            return response()->json([
+                'message' => $transferResult['message'],
+            ], 500);
+        }
+
+        $transferId = $transferResult['transfer']['id'];
+
+        // Step 2: Dispatch background job to handle the rest automatically
+        UploadVideoFromPutio::dispatch(
+            $transferId,
+            $validated['title'],
+            $validated['description'] ?? null
+        );
+
+        return response()->json([
+            'message' => 'Upload process started in background. The system will automatically download from Put.io and upload to Cloudflare.',
+            'transfer' => [
+                'id' => $transferId,
+                'name' => $transferResult['transfer']['name'],
+                'status' => $transferResult['transfer']['status'],
+            ],
+            'note' => 'Check logs for progress. Video will appear in Cloudflare Stream dashboard when complete.',
+        ], 202);
+    }
+
+    /**
+     * Complete upload from Put.io to Cloudflare after transfer is done
+     */
+    public function completeUpload(Request $request, $transferId)
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+        ]);
+
+        // Check transfer status first
+        $transfer = $this->putio->getTransferStatus($transferId);
+
+        if (!$transfer) {
+            return response()->json([
+                'message' => 'Transfer not found',
+            ], 404);
+        }
+
+        if ($transfer['status'] !== 'COMPLETED' && $transfer['status'] !== 'SEEDING') {
+            return response()->json([
+                'message' => 'Transfer not yet completed',
+                'status' => $transfer['status'],
+                'percent_done' => $transfer['percent_done'] ?? 0,
+            ], 400);
+        }
+
+        // Get file URL
+        $fileId = $transfer['file_id'];
+        $fileUrl = $this->putio->getFileUrl($fileId);
+
+        if (!$fileUrl) {
+            return response()->json([
+                'message' => 'Failed to get download URL from Put.io',
+            ], 500);
+        }
+
+        // Upload to Cloudflare
+        $metadata = [
+            'name' => $validated['title'],
+            'requireSignedURLs' => false,
+        ];
+
+        if (isset($validated['description'])) {
+            $metadata['description'] = $validated['description'];
+        }
+
+        $cloudflareResult = $this->cloudflare->uploadFromUrl($fileUrl, $metadata);
+
+        if ($cloudflareResult) {
+            return response()->json([
+                'message' => 'Video upload to Cloudflare initiated successfully',
+                'putio' => [
+                    'transfer_id' => $transferId,
+                    'file_id' => $fileId,
+                    'file_name' => $transfer['name'],
+                ],
+                'video' => [
+                    'uid' => $cloudflareResult['uid'],
+                    'status' => $cloudflareResult['status']['state'] ?? 'processing',
+                    'ready' => $cloudflareResult['readyToStream'] ?? false,
+                    'stream_url' => $this->cloudflare->getStreamUrl($cloudflareResult['uid']),
+                    'thumbnail' => $this->cloudflare->getThumbnailUrl($cloudflareResult['uid']),
+                    'embed_url' => $this->cloudflare->getEmbedUrl($cloudflareResult['uid']),
+                ],
+                'note' => 'Cloudflare is now processing the video. Check status at /api/admin/cloudflare/video/{uid}/status',
+            ], 202);
+        }
+
+        return response()->json([
+            'message' => 'Failed to upload video to Cloudflare Stream',
+        ], 500);
+    }
+
+    /**
+     * Initiate magnet transfer without waiting (async approach)
+     */
+    public function initiateMagnetTransfer(Request $request)
+    {
+        $validated = $request->validate([
+            'magnet_url' => 'required|string',
+        ]);
+
+        $transferResult = $this->putio->addTransfer($validated['magnet_url']);
+
+        if (!$transferResult['success']) {
+            return response()->json([
+                'message' => $transferResult['message'],
+            ], 500);
+        }
+
+        return response()->json([
+            'message' => 'Transfer initiated successfully',
+            'transfer' => [
+                'id' => $transferResult['transfer']['id'],
+                'name' => $transferResult['transfer']['name'],
+                'status' => $transferResult['transfer']['status'],
+            ],
+        ], 201);
+    }
+
+    /**
+     * Check Put.io transfer status
+     */
+    public function checkTransferStatus($transferId)
+    {
+        $transfer = $this->putio->getTransferStatus($transferId);
+
+        if (!$transfer) {
+            return response()->json([
+                'message' => 'Transfer not found',
+            ], 404);
+        }
+
+        return response()->json([
+            'message' => 'Transfer status retrieved',
+            'transfer' => [
+                'id' => $transfer['id'],
+                'name' => $transfer['name'],
+                'status' => $transfer['status'],
+                'percent_done' => $transfer['percent_done'] ?? 0,
+                'size' => $transfer['size'] ?? null,
+                'downloaded' => $transfer['downloaded'] ?? null,
+                'file_id' => $transfer['file_id'] ?? null,
+            ],
+        ]);
+    }
+
+    /**
+     * Get video details and streaming URLs.
+     */
+    public function getVideo($videoUid)
+    {
+        $video = $this->cloudflare->getVideo($videoUid);
+
+        if ($video) {
+            return response()->json([
+                'message' => 'Video retrieved successfully',
+                'video' => [
+                    'uid' => $video['uid'],
+                    'status' => $video['status']['state'] ?? 'unknown',
+                    'ready' => $video['readyToStream'] ?? false,
+                    'duration' => $video['duration'] ?? null,
+                    'stream_url' => $this->cloudflare->getStreamUrl($video['uid']),
+                    'dash_url' => $this->cloudflare->getDashUrl($video['uid']),
+                    'thumbnail' => $this->cloudflare->getThumbnailUrl($video['uid']),
+                    'embed_url' => $this->cloudflare->getEmbedUrl($video['uid']),
+                ],
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Video not found',
+        ], 404);
+    }
+
+    /**
+     * Get streaming URL for a video.
+     */
+    public function getStreamUrl($videoUid)
+    {
+        return response()->json([
+            'message' => 'Stream URL retrieved',
+            'video_uid' => $videoUid,
+            'stream_url' => $this->cloudflare->getStreamUrl($videoUid),
+            'dash_url' => $this->cloudflare->getDashUrl($videoUid),
+            'thumbnail' => $this->cloudflare->getThumbnailUrl($videoUid),
+            'embed_url' => $this->cloudflare->getEmbedUrl($videoUid),
+        ]);
+    }
+
+    /**
+     * Get upload status for a video (Admin only).
+     */
+    public function getUploadStatus($videoUid)
+    {
+        $status = $this->cloudflare->getUploadStatus($videoUid);
+
+        if ($status) {
+            return response()->json([
+                'message' => 'Upload status retrieved',
+                'status' => $status,
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Could not retrieve upload status',
+        ], 404);
+    }
+
+    /**
+     * Delete a video from Cloudflare Stream (Admin only).
+     */
+    public function deleteVideo($videoUid)
+    {
+        $deleted = $this->cloudflare->deleteVideo($videoUid);
+
+        if ($deleted) {
+            return response()->json([
+                'message' => 'Video deleted successfully',
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Failed to delete video',
+        ], 500);
+    }
+
+    /**
+     * Get all captions/subtitles for a video
+     */
+    public function getCaptions($videoUid)
+    {
+        $captions = $this->cloudflare->getCaptions($videoUid);
+
+        return response()->json([
+            'message' => 'Captions retrieved successfully',
+            'video_uid' => $videoUid,
+            'captions' => $captions,
+        ]);
+    }
+
+    /**
+     * Upload subtitle file to a video (Admin only)
+     */
+    public function uploadSubtitle(Request $request, $videoUid)
+    {
+        $validated = $request->validate([
+            'subtitle_file' => 'required|file|mimes:vtt,srt|max:2048', // 2MB max
+            'language' => 'required|string|max:10',
+            'label' => 'nullable|string|max:255',
+        ]);
+
+        $file = $request->file('subtitle_file');
+        $language = $validated['language'];
+        $label = $validated['label'] ?? ucfirst($language);
+
+        // Save temporarily
+        $tempPath = $file->store('temp/subtitles');
+        $fullPath = storage_path("app/{$tempPath}");
+
+        // Convert SRT to VTT if needed
+        if ($file->getClientOriginalExtension() === 'srt') {
+            $vttPath = str_replace('.srt', '.vtt', $fullPath);
+            $this->convertSrtToVtt($fullPath, $vttPath);
+            $fullPath = $vttPath;
+        }
+
+        $result = $this->cloudflare->uploadSubtitle($videoUid, $fullPath, $language, $label);
+
+        // Clean up
+        if (file_exists($fullPath)) {
+            unlink($fullPath);
+        }
+        if (file_exists(storage_path("app/{$tempPath}"))) {
+            unlink(storage_path("app/{$tempPath}"));
+        }
+
+        if ($result) {
+            return response()->json([
+                'message' => 'Subtitle uploaded successfully',
+                'video_uid' => $videoUid,
+                'language' => $language,
+            ], 201);
+        }
+
+        return response()->json([
+            'message' => 'Failed to upload subtitle',
+        ], 500);
+    }
+
+    /**
+     * Delete a subtitle track from a video (Admin only)
+     */
+    public function deleteSubtitle($videoUid, $language)
+    {
+        $deleted = $this->cloudflare->deleteCaption($videoUid, $language);
+
+        if ($deleted) {
+            return response()->json([
+                'message' => 'Subtitle deleted successfully',
+                'video_uid' => $videoUid,
+                'language' => $language,
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Failed to delete subtitle',
+        ], 500);
+    }
+
+    /**
+     * Convert SRT to VTT format
+     *
+     * @param string $srtPath
+     * @param string $vttPath
+     * @return void
+     */
+    protected function convertSrtToVtt(string $srtPath, string $vttPath): void
+    {
+        $srtContent = file_get_contents($srtPath);
+        $vttContent = "WEBVTT\n\n" . str_replace(',', '.', $srtContent);
+        file_put_contents($vttPath, $vttContent);
+    }
+}
