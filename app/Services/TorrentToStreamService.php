@@ -26,6 +26,30 @@ class TorrentToStreamService
     }
 
     /**
+     * Upload video from magnet URL (background processing)
+     *
+     * @param string $magnetUrl
+     * @param array $metadata Video metadata
+     * @return array
+     */
+    public function uploadFromMagnet(string $magnetUrl, array $metadata = []): array
+    {
+        // Add transfer to Put.io (without waiting for completion)
+        $result = $this->processToStream($magnetUrl, $metadata, false);
+
+        if ($result['success']) {
+            // Dispatch background job with 30 second delay to allow transfer to start
+            \App\Jobs\UploadVideoFromPutio::dispatch(
+                $result['transfer_id'],
+                $metadata['name'] ?? 'Untitled',
+                $metadata['description'] ?? null
+            )->delay(now()->addSeconds(30));
+        }
+
+        return $result;
+    }
+
+    /**
      * Process a magnet/torrent link to Cloudflare Stream
      *
      * @param string $magnetOrTorrentUrl

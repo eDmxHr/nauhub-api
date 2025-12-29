@@ -131,6 +131,7 @@ class VideoController extends Controller
             'thumbnail' => 'nullable|string|max:500',
             'banner' => 'nullable|string|max:500',
             'cloudflare_video_uid' => 'nullable|string|max:255',
+            'magnet_url' => 'nullable|string', // For movies only
             'duration' => 'nullable|integer|min:0',
             'release_year' => 'nullable|integer|min:1900|max:' . (date('Y') + 5),
             'age_rating' => 'nullable|string|max:10',
@@ -144,10 +145,11 @@ class VideoController extends Controller
             'genre_ids.*' => 'exists:genres,id',
         ]);
 
-        // Extract relationship data
+        // Extract relationship data and magnet URL
         $categoryIds = $validated['category_ids'] ?? [];
         $genreIds = $validated['genre_ids'] ?? [];
-        unset($validated['category_ids'], $validated['genre_ids']);
+        $magnetUrl = $validated['magnet_url'] ?? null;
+        unset($validated['category_ids'], $validated['genre_ids'], $validated['magnet_url']);
 
         // Set defaults
         $validated['view_count'] = 0;
@@ -155,10 +157,30 @@ class VideoController extends Controller
         $validated['is_featured'] = $validated['is_featured'] ?? false;
         $validated['is_trending'] = $validated['is_trending'] ?? false;
 
-        // For movies, validate cloudflare_video_uid is required
+        // For movies with magnet URL, initiate upload in background
+        if ($validated['type'] === 'movie' && $magnetUrl) {
+            $torrentService = app(\App\Services\TorrentToStreamService::class);
+
+            $result = $torrentService->uploadFromMagnet($magnetUrl, [
+                'name' => $validated['title'],
+            ]);
+
+            if ($result['success']) {
+                // Store transfer ID temporarily (will be updated by background job with actual UID)
+                $validated['cloudflare_video_uid'] = 'processing_transfer_' . $result['transfer_id'];
+            } else {
+                return response()->json([
+                    'message' => 'Failed to initiate video upload',
+                    'error' => $result['message'] ?? 'Unknown error',
+                ], 500);
+            }
+        }
+
+        // For movies without magnet URL, cloudflare_video_uid should be provided
         if ($validated['type'] === 'movie' && empty($validated['cloudflare_video_uid'])) {
-            // Placeholder: In production, this would trigger Put.io download + Cloudflare upload
-            $validated['cloudflare_video_uid'] = 'placeholder_' . uniqid();
+            return response()->json([
+                'message' => 'Either cloudflare_video_uid or magnet_url is required for movies',
+            ], 400);
         }
 
         $video = Video::create($validated);
@@ -175,7 +197,7 @@ class VideoController extends Controller
         $video->load(['categories', 'genres']);
 
         return response()->json([
-            'message' => 'Video created successfully',
+            'message' => 'Video created successfully' . ($magnetUrl ? '. Upload processing in background.' : ''),
             'video' => $video,
         ], 201);
     }

@@ -28,6 +28,10 @@ use App\Http\Controllers\Api\CloudflareController;
 
 // Authentication routes (public - no auth required)
 Route::prefix('auth')->group(function () {
+  // Admin login with email/password
+  // POST /api/auth/login
+  Route::post('/login', [AuthController::class, 'login']);
+
   // Send OTP to phone number
   // POST /api/auth/send-otp
   Route::post('/send-otp', [AuthController::class, 'sendOtp']);

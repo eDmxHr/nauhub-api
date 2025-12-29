@@ -57,7 +57,8 @@ class UploadVideoFromPutio implements ShouldQueue
                 'status' => $result['stream_status'],
             ]);
 
-            // TODO: Store video UID in database, send notification to admin, etc.
+            // Update Video or Episode with actual Cloudflare UID
+            $this->updateDatabaseRecord($result['stream_uid']);
         } else {
             Log::error('Failed to process transfer to Cloudflare', [
                 'transfer_id' => $this->transferId,
@@ -65,5 +66,42 @@ class UploadVideoFromPutio implements ShouldQueue
                 'message' => $result['message'] ?? 'Unknown error',
             ]);
         }
+    }
+
+    /**
+     * Update Video or Episode record with actual Cloudflare UID
+     */
+    protected function updateDatabaseRecord(string $cloudflareUid): void
+    {
+        $tempUid = 'processing_transfer_' . $this->transferId;
+
+        // Try to find in Videos table
+        $video = \App\Models\Video::where('cloudflare_video_uid', $tempUid)->first();
+
+        if ($video) {
+            $video->update(['cloudflare_video_uid' => $cloudflareUid]);
+            Log::info('Updated video with Cloudflare UID', [
+                'video_id' => $video->id,
+                'cloudflare_uid' => $cloudflareUid,
+            ]);
+            return;
+        }
+
+        // Try to find in Episodes table
+        $episode = \App\Models\Episode::where('cloudflare_video_uid', $tempUid)->first();
+
+        if ($episode) {
+            $episode->update(['cloudflare_video_uid' => $cloudflareUid]);
+            Log::info('Updated episode with Cloudflare UID', [
+                'episode_id' => $episode->id,
+                'cloudflare_uid' => $cloudflareUid,
+            ]);
+            return;
+        }
+
+        Log::warning('No video or episode found with transfer ID', [
+            'transfer_id' => $this->transferId,
+            'temp_uid' => $tempUid,
+        ]);
     }
 }

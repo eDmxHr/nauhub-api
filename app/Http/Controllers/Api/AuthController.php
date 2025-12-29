@@ -10,9 +10,38 @@ use Illuminate\Http\Request;
 class AuthController extends Controller
 {
   /**
+   * Admin login with email/password
+   * POST /api/auth/login
+   */
+  public function login(Request $request)
+  {
+    $validated = $request->validate([
+      'email' => 'required|email',
+      'password' => 'required|string',
+    ]);
+
+    $user = User::where('email', $validated['email'])->first();
+
+    if (!$user || !\Hash::check($validated['password'], $user->password)) {
+      return response()->json([
+        'message' => 'Invalid credentials',
+      ], 401);
+    }
+
+    // Create token
+    $token = $user->createToken('auth_token')->plainTextToken;
+
+    return response()->json([
+      'access_token' => $token,
+      'token_type' => 'bearer',
+      'user' => $user,
+    ]);
+  }
+
+  /**
    * Send OTP to phone number
    * POST /api/auth/send-otp
-   * 
+   *
    * Request body: { "phone": "1234567" }
    */
   public function sendOtp(Request $request)
