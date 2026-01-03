@@ -12,6 +12,11 @@ use App\Http\Controllers\Api\WatchHistoryController;
 use App\Http\Controllers\Api\PlaylistController;
 use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\CloudflareController;
+use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\IntegrationController;
+use App\Http\Controllers\Api\SubscriptionPlanController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\ActivityLogController;
 
 /*
 |--------------------------------------------------------------------------
@@ -149,6 +154,13 @@ Route::middleware('auth:sanctum')->group(function () {
 // Admin routes (require authentication + admin role)
 Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function () {
 
+  // Admin: Dashboard & Statistics
+  Route::prefix('dashboard')->group(function () {
+    Route::get('/', [DashboardController::class, 'index']); // Get dashboard statistics
+    Route::get('/revenue-chart', [DashboardController::class, 'revenueChart']); // Get revenue chart data
+    Route::get('/user-growth-chart', [DashboardController::class, 'userGrowthChart']); // Get user growth chart data
+  });
+
   // Admin: Categories management
   Route::prefix('categories')->group(function () {
     Route::post('/', [CategoryController::class, 'store']);
@@ -165,6 +177,7 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
 
   // Admin: Videos management
   Route::prefix('videos')->group(function () {
+    Route::get('/', [VideoController::class, 'adminIndex']); // List all videos (including unpublished)
     Route::post('/', [VideoController::class, 'store']);
     Route::put('/{id}', [VideoController::class, 'update']);
     Route::delete('/{id}', [VideoController::class, 'destroy']);
@@ -213,5 +226,41 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::get('/video/{videoUid}', [CloudflareController::class, 'getVideo']); // Get video details
     Route::get('/video/{videoUid}/status', [CloudflareController::class, 'getUploadStatus']); // Get upload status
     Route::delete('/video/{videoUid}', [CloudflareController::class, 'deleteVideo']); // Delete video
+  });
+
+  // Admin: User management
+  Route::prefix('users')->group(function () {
+    Route::get('/', [UserController::class, 'index']); // List all users with filters
+    Route::get('/stats', [UserController::class, 'stats']); // Get user statistics
+    Route::get('/{id}', [UserController::class, 'show']); // View single user details
+    Route::put('/{id}/role', [UserController::class, 'updateRole']); // Change user role
+    Route::put('/{id}/toggle-active', [UserController::class, 'toggleActive']); // Block/unblock user
+  });
+
+  // Admin: Integration management
+  Route::prefix('integrations')->group(function () {
+    Route::get('/', [IntegrationController::class, 'index']); // List all integrations status
+    Route::post('/cloudflare/test', [IntegrationController::class, 'testCloudflare']); // Test Cloudflare connection
+    Route::post('/putio/test', [IntegrationController::class, 'testPutio']); // Test Put.io connection
+  });
+
+  // Admin: Subscription plan management
+  Route::prefix('plans')->group(function () {
+    Route::get('/', [SubscriptionPlanController::class, 'index']); // List all plans
+    Route::post('/', [SubscriptionPlanController::class, 'store']); // Create new plan
+    Route::get('/{id}', [SubscriptionPlanController::class, 'show']); // Get single plan
+    Route::put('/{id}', [SubscriptionPlanController::class, 'update']); // Update plan
+    Route::delete('/{id}', [SubscriptionPlanController::class, 'destroy']); // Delete plan
+    Route::put('/{id}/toggle-active', [SubscriptionPlanController::class, 'toggleActive']); // Toggle active status
+  });
+
+  // Admin: Activity Logs
+  Route::prefix('activity-logs')->group(function () {
+    Route::get('/', [ActivityLogController::class, 'index']); // List all activity logs with filters
+    Route::get('/stats', [ActivityLogController::class, 'stats']); // Get activity log statistics
+    Route::get('/critical', [ActivityLogController::class, 'criticalActivities']); // Get critical/error activities
+    Route::get('/{id}', [ActivityLogController::class, 'show']); // Get single activity log
+    Route::get('/entity/{entityType}/{entityId}', [ActivityLogController::class, 'byEntity']); // Get logs for specific entity
+    Route::delete('/cleanup', [ActivityLogController::class, 'cleanup']); // Cleanup old logs
   });
 });

@@ -160,6 +160,36 @@ class TorrentToStreamService
 
         $fileId = $transfer['file_id'];
 
+        // Check if it's a folder and find the actual video file
+        $fileInfo = $this->putioService->getFile($fileId);
+
+        if ($fileInfo['content_type'] === 'application/x-directory') {
+            Log::info('Transfer is a folder, finding video file inside', ['folder_id' => $fileId]);
+
+            $files = $this->putioService->listFiles($fileId);
+
+            // Pick the main video file (largest .mp4/.mkv/.mov/.avi)
+            $videoFile = collect($files)
+                ->filter(fn($f) => in_array(pathinfo($f['name'], PATHINFO_EXTENSION), ['mp4', 'mkv', 'mov', 'avi']))
+                ->sortByDesc('size')
+                ->first();
+
+            if (!$videoFile) {
+                return [
+                    'success' => false,
+                    'step' => 'find_video_file',
+                    'message' => 'No video file found in folder',
+                ];
+            }
+
+            $fileId = $videoFile['id'];
+            Log::info('Found video file in folder', [
+                'video_file_id' => $fileId,
+                'name' => $videoFile['name'],
+                'size' => $videoFile['size'],
+            ]);
+        }
+
         // Continue with steps 3-5 from processToStream()
         $downloadUrl = $this->putioService->getFileUrl($fileId);
 
@@ -171,7 +201,10 @@ class TorrentToStreamService
             ];
         }
 
-        $streamResult = $this->cloudflareService->uploadFromUrl($downloadUrl, $metadata);
+        // Use direct upload instead of URL upload to avoid Put.io rate limiting
+        Log::info('Using direct upload method', ['file_id' => $fileId]);
+
+        $streamResult = $this->uploadFromPutioToCloudflare($downloadUrl, $fileId, $metadata);
 
         if (!$streamResult) {
             return [
@@ -189,6 +222,74 @@ class TorrentToStreamService
             'stream_status' => $streamResult['status']['state'] ?? 'unknown',
             'cloudflare_result' => $streamResult,
         ];
+    }
+
+    /**
+     * Download file from Put.io and upload directly to Cloudflare
+     *
+     * @param string $downloadUrl
+     * @param int $fileId
+     * @param array $metadata
+     * @return array|null
+     */
+    protected function uploadFromPutioToCloudflare(string $downloadUrl, int $fileId, array $metadata = [])
+    {
+        try {
+            // Get file info from Put.io
+            $fileInfo = $this->putioService->getFile($fileId);
+            if (!$fileInfo) {
+                Log::error('Could not get Put.io file info', ['file_id' => $fileId]);
+                return null;
+            }
+
+            $fileName = $fileInfo['name'];
+            $fileSize = $fileInfo['size'];
+
+            Log::info('Starting direct upload to Cloudflare', [
+                'file_name' => $fileName,
+                'file_size' => $fileSize,
+            ]);
+
+            // Download file from Put.io in chunks and stream to Cloudflare
+            $tempFile = tempnam(sys_get_temp_dir(), 'putio_');
+
+            // Download file from Put.io
+            $ch = curl_init($downloadUrl);
+            $fp = fopen($tempFile, 'w+');
+
+            curl_setopt($ch, CURLOPT_FILE, $fp);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 3600); // 1 hour timeout
+            curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            fclose($fp);
+
+            if ($httpCode !== 200) {
+                Log::error('Failed to download from Put.io', ['http_code' => $httpCode]);
+                unlink($tempFile);
+                return null;
+            }
+
+            Log::info('File downloaded from Put.io, uploading to Cloudflare', [
+                'temp_file' => $tempFile,
+                'size' => filesize($tempFile),
+            ]);
+
+            // Upload to Cloudflare Stream using multipart form data
+            $result = $this->cloudflareService->uploadFromFile($tempFile, $fileName, $metadata);
+
+            // Clean up temp file
+            unlink($tempFile);
+
+            return $result;
+        } catch (\Exception $e) {
+            Log::error('Direct upload exception', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return null;
+        }
     }
 
     /**

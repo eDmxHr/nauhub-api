@@ -9,6 +9,69 @@ use Illuminate\Http\Request;
 class VideoController extends Controller
 {
     /**
+     * Admin: Display all videos including unpublished ones
+     */
+    public function adminIndex(Request $request)
+    {
+        $perPage = $request->input('per_page', 15);
+        $type = $request->input('type'); // movie, series, anime
+        $status = $request->input('status'); // pending, processing, ready, error
+        $published = $request->input('published'); // Don't filter by default
+        $search = $request->input('search');
+        $sortBy = $request->input('sort_by', 'newest');
+
+        $query = Video::query()
+            ->with(['categories', 'genres', 'seasons']);
+
+        // Search by title or description
+        if ($search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('title', 'like', '%' . $search . '%')
+                  ->orWhere('description', 'like', '%' . $search . '%');
+            });
+        }
+
+        // Filter by type
+        if ($type) {
+            $query->where('type', $type);
+        }
+
+        // Filter by status
+        if ($status) {
+            $query->where('status', $status);
+        }
+
+        // Filter by published status (optional for admin)
+        if ($published !== null) {
+            $query->where('is_published', $published);
+        }
+
+        // Sorting
+        switch ($sortBy) {
+            case 'oldest':
+                $query->orderBy('created_at', 'asc');
+                break;
+            case 'rating':
+                $query->orderBy('imdb_rating', 'desc');
+                break;
+            case 'title':
+                $query->orderBy('title', 'asc');
+                break;
+            case 'views':
+                $query->orderBy('view_count', 'desc');
+                break;
+            case 'newest':
+            default:
+                $query->orderBy('created_at', 'desc');
+                break;
+        }
+
+        $videos = $query->paginate($perPage);
+
+        return response()->json($videos);
+    }
+
+    /**
      * Display a paginated listing of videos with search and filters.
      */
     public function index(Request $request)

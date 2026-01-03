@@ -32,6 +32,7 @@ class User extends Authenticatable
         'phone_verified', // Phone verification status
         'role',           // 'user' or 'admin'
         'is_subscribed',  // Subscription status
+        'is_active',      // Account active status (for blocking users)
     ];
 
     /**
@@ -58,6 +59,7 @@ class User extends Authenticatable
             'password' => 'hashed',  // Auto-hash passwords
             'phone_verified' => 'boolean',
             'is_subscribed' => 'boolean',
+            'is_active' => 'boolean',
         ];
     }
 

@@ -16,6 +16,7 @@ class Video extends Model
         'thumbnail',
         'banner',
         'cloudflare_video_uid',
+        'status',
         'duration',
         'release_year',
         'age_rating',      // e.g., "PG-13", "R", "TV-MA"

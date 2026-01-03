@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Subscription;
 use App\Models\Payment;
+use App\Models\SubscriptionPlan;
+use App\Models\ActivityLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
@@ -16,105 +18,25 @@ class SubscriptionController extends Controller
      */
     public function plans()
     {
-        $plans = [
-            // Basic Plan
-            [
-                'id' => 'basic_monthly',
-                'tier' => 'basic',
-                'name' => 'Basic - Monthly',
-                'duration' => 'monthly',
-                'price' => 99.00,
-                'currency' => 'MVR',
-                'duration_days' => 30,
-                'features' => [
-                    '1 screen at a time',
-                    '1 profile',
-                    'Standard content library access',
-                ],
-            ],
-            [
-                'id' => 'basic_annual',
-                'tier' => 'basic',
-                'name' => 'Basic - Annual',
-                'duration' => 'annual',
-                'price' => 990.00,
-                'currency' => 'MVR',
-                'duration_days' => 365,
-                'savings' => 'MVR 198',
-                'discount_text' => '2 months free!',
-                'features' => [
-                    '1 screen at a time',
-                    '1 profile',
-                    'Standard content library access',
-                ],
-            ],
-
-            // Standard Plan (Most Popular)
-            [
-                'id' => 'standard_monthly',
-                'tier' => 'standard',
-                'name' => 'Standard - Monthly',
-                'duration' => 'monthly',
-                'price' => 149.00,
-                'currency' => 'MVR',
-                'duration_days' => 30,
-                'popular' => true,
-                'features' => [
-                    '2 screens simultaneously',
-                    'Up to 3 profiles',
-                    'Full content library',
-                ],
-            ],
-            [
-                'id' => 'standard_annual',
-                'tier' => 'standard',
-                'name' => 'Standard - Annual',
-                'duration' => 'annual',
-                'price' => 1490.00,
-                'currency' => 'MVR',
-                'duration_days' => 365,
-                'savings' => 'MVR 298',
-                'discount_text' => '2 months free!',
-                'popular' => true,
-                'features' => [
-                    '2 screens simultaneously',
-                    'Up to 3 profiles',
-                    'Full content library',
-                ],
-            ],
-
-            // Premium Plan
-            [
-                'id' => 'premium_monthly',
-                'tier' => 'premium',
-                'name' => 'Premium - Monthly',
-                'duration' => 'monthly',
-                'price' => 199.00,
-                'currency' => 'MVR',
-                'duration_days' => 30,
-                'features' => [
-                    '4 screens simultaneously',
-                    'Up to 5 profiles',
-                    'Full content library',
-                ],
-            ],
-            [
-                'id' => 'premium_annual',
-                'tier' => 'premium',
-                'name' => 'Premium - Annual',
-                'duration' => 'annual',
-                'price' => 1990.00,
-                'currency' => 'MVR',
-                'duration_days' => 365,
-                'savings' => 'MVR 398',
-                'discount_text' => '2 months free!',
-                'features' => [
-                    '4 screens simultaneously',
-                    'Up to 5 profiles',
-                    'Full content library',
-                ],
-            ],
-        ];
+        // Fetch active plans from database
+        $plans = SubscriptionPlan::active()
+            ->orderBy('sort_order')
+            ->get()
+            ->map(function ($plan) {
+                return [
+                    'id' => $plan->plan_id,
+                    'tier' => $plan->tier,
+                    'name' => $plan->name,
+                    'duration' => $plan->duration,
+                    'price' => (float) $plan->price,
+                    'currency' => $plan->currency,
+                    'duration_days' => $plan->duration_days,
+                    'features' => $plan->features,
+                    'popular' => $plan->is_popular,
+                    'savings' => $plan->savings_text,
+                    'discount_text' => $plan->discount_text,
+                ];
+            });
 
         return response()->json([
             'message' => 'Subscription plans retrieved successfully',
@@ -157,23 +79,34 @@ class SubscriptionController extends Controller
     public function subscribe(Request $request)
     {
         $validated = $request->validate([
-            'plan_id' => 'required|in:basic_monthly,basic_annual,standard_monthly,standard_annual,premium_monthly,premium_annual',
+            'plan_id' => 'required|string|exists:subscription_plans,plan_id',
             'proof_image' => 'required|image|max:5120', // 5MB max
         ]);
 
         $userId = $request->user()->id;
 
-        // Define pricing
-        $pricing = [
-            'basic_monthly' => ['tier' => 'basic', 'duration' => 'monthly', 'amount' => 99.00, 'days' => 30],
-            'basic_annual' => ['tier' => 'basic', 'duration' => 'annual', 'amount' => 990.00, 'days' => 365],
-            'standard_monthly' => ['tier' => 'standard', 'duration' => 'monthly', 'amount' => 149.00, 'days' => 30],
-            'standard_annual' => ['tier' => 'standard', 'duration' => 'annual', 'amount' => 1490.00, 'days' => 365],
-            'premium_monthly' => ['tier' => 'premium', 'duration' => 'monthly', 'amount' => 199.00, 'days' => 30],
-            'premium_annual' => ['tier' => 'premium', 'duration' => 'annual', 'amount' => 1990.00, 'days' => 365],
-        ];
+        // Fetch plan from database
+        $planModel = SubscriptionPlan::where('plan_id', $validated['plan_id'])->first();
 
-        $plan = $pricing[$validated['plan_id']];
+        if (!$planModel) {
+            return response()->json([
+                'message' => 'Invalid subscription plan'
+            ], 400);
+        }
+
+        if (!$planModel->is_active) {
+            return response()->json([
+                'message' => 'This subscription plan is no longer available'
+            ], 400);
+        }
+
+        // Map to plan array format
+        $plan = [
+            'tier' => $planModel->tier,
+            'duration' => $planModel->duration,
+            'amount' => $planModel->price,
+            'days' => $planModel->duration_days,
+        ];
 
         // Upload payment proof
         $proofPath = null;
@@ -314,6 +247,22 @@ class SubscriptionController extends Controller
             ]);
         }
 
+        // Log payment approval
+        ActivityLog::log(
+            'payment_approved',
+            "Payment #{$payment->id} approved for user {$payment->user->name}",
+            'Payment',
+            $payment->id,
+            [
+                'amount' => $payment->amount,
+                'currency' => $payment->currency,
+                'reference_code' => $payment->reference_code,
+                'admin_notes' => $validated['admin_notes'] ?? null,
+                'user_id' => $payment->user_id,
+            ],
+            'info'
+        );
+
         return response()->json([
             'message' => 'Payment approved and subscription activated',
             'payment' => $payment->fresh(['subscription']),
@@ -357,6 +306,22 @@ class SubscriptionController extends Controller
                 'status' => 'cancelled',
             ]);
         }
+
+        // Log payment rejection
+        ActivityLog::log(
+            'payment_rejected',
+            "Payment #{$payment->id} rejected for user {$payment->user->name}",
+            'Payment',
+            $payment->id,
+            [
+                'amount' => $payment->amount,
+                'currency' => $payment->currency,
+                'reference_code' => $payment->reference_code,
+                'admin_notes' => $validated['admin_notes'],
+                'user_id' => $payment->user_id,
+            ],
+            'warning'
+        );
 
         return response()->json([
             'message' => 'Payment rejected',
