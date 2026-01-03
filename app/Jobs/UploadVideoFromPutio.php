@@ -89,7 +89,7 @@ class UploadVideoFromPutio implements ShouldQueue
         'cloudflare_uid' => $cloudflareUid,
       ]);
 
-      // Start monitoring transcoding status (first check in 2 minutes)
+      // Start monitoring transcoding status (first check in two minutes)
       \App\Jobs\CheckVideoTranscodingStatus::dispatch('video', $video->id, $cloudflareUid)
         ->delay(now()->addMinutes(2));
 
