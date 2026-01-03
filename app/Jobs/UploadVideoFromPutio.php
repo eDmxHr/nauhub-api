@@ -11,7 +11,7 @@ class UploadVideoFromPutio implements ShouldQueue
 {
     use Queueable;
 
-    public $timeout = 1800; // 30 minutes timeout
+    public $timeout = 7200; // 2 hours timeout (for large file downloads + TUS upload)
     public $tries = 1; // Only try once
 
     protected $transferId;
@@ -79,11 +79,20 @@ class UploadVideoFromPutio implements ShouldQueue
         $video = \App\Models\Video::where('cloudflare_video_uid', $tempUid)->first();
 
         if ($video) {
-            $video->update(['cloudflare_video_uid' => $cloudflareUid]);
+            $video->update([
+                'cloudflare_video_uid' => $cloudflareUid,
+                'status' => 'processing',
+                'is_published' => false, // Don't publish until transcoding is complete
+            ]);
             Log::info('Updated video with Cloudflare UID', [
                 'video_id' => $video->id,
                 'cloudflare_uid' => $cloudflareUid,
             ]);
+
+            // Start monitoring transcoding status (first check in 5 minutes)
+            \App\Jobs\CheckVideoTranscodingStatus::dispatch('video', $video->id, $cloudflareUid)
+                ->delay(now()->addMinutes(5));
+
             return;
         }
 
@@ -91,11 +100,20 @@ class UploadVideoFromPutio implements ShouldQueue
         $episode = \App\Models\Episode::where('cloudflare_video_uid', $tempUid)->first();
 
         if ($episode) {
-            $episode->update(['cloudflare_video_uid' => $cloudflareUid]);
+            $episode->update([
+                'cloudflare_video_uid' => $cloudflareUid,
+                'status' => 'processing',
+                'is_published' => false, // Don't publish until transcoding is complete
+            ]);
             Log::info('Updated episode with Cloudflare UID', [
                 'episode_id' => $episode->id,
                 'cloudflare_uid' => $cloudflareUid,
             ]);
+
+            // Start monitoring transcoding status (first check in 5 minutes)
+            \App\Jobs\CheckVideoTranscodingStatus::dispatch('episode', $episode->id, $cloudflareUid)
+                ->delay(now()->addMinutes(5));
+
             return;
         }
 

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\OtpVerification;
+use App\Models\ActivityLog;
 use Illuminate\Http\Request;
 
 class AuthController extends Controller
@@ -23,13 +24,52 @@ class AuthController extends Controller
     $user = User::where('email', $validated['email'])->first();
 
     if (!$user || !\Hash::check($validated['password'], $user->password)) {
+      // Log failed login attempt
+      ActivityLog::log(
+        'login_failed',
+        "Failed login attempt for email: {$validated['email']}",
+        'User',
+        $user?->id,
+        ['email' => $validated['email']],
+        'warning',
+        $user?->id
+      );
+
       return response()->json([
         'message' => 'Invalid credentials',
       ], 401);
     }
 
+    // Check if user is active
+    if (!$user->is_active) {
+      ActivityLog::log(
+        'login_blocked',
+        "Login attempt by blocked user: {$user->email}",
+        'User',
+        $user->id,
+        ['email' => $user->email],
+        'warning',
+        $user->id
+      );
+
+      return response()->json([
+        'message' => 'Your account has been deactivated. Please contact support.',
+      ], 403);
+    }
+
     // Create token
     $token = $user->createToken('auth_token')->plainTextToken;
+
+    // Log successful login
+    ActivityLog::log(
+      'login',
+      "User {$user->name} logged in via admin panel",
+      'User',
+      $user->id,
+      ['email' => $user->email, 'role' => $user->role],
+      'info',
+      $user->id
+    );
 
     return response()->json([
       'access_token' => $token,
@@ -115,6 +155,17 @@ class AuthController extends Controller
         $user->update(['phone_verified' => true]);
       }
       $isNewUser = false;
+
+      // Log OTP login
+      ActivityLog::log(
+        'login_otp',
+        "User {$user->name} logged in via OTP",
+        'User',
+        $user->id,
+        ['phone' => $validated['phone']],
+        'info',
+        $user->id
+      );
     } else {
       // New user - create account
       $user = User::create([
@@ -125,6 +176,17 @@ class AuthController extends Controller
         'is_subscribed' => false, // Default subscription status
       ]);
       $isNewUser = true;
+
+      // Log user registration
+      ActivityLog::log(
+        'user_registered',
+        "New user registered: {$user->name}",
+        'User',
+        $user->id,
+        ['phone' => $validated['phone'], 'registration_method' => 'otp'],
+        'info',
+        $user->id
+      );
     }
 
     // Generate Sanctum authentication token
@@ -146,8 +208,21 @@ class AuthController extends Controller
    */
   public function logout(Request $request)
   {
+    $user = $request->user();
+
+    // Log logout
+    ActivityLog::log(
+      'logout',
+      "User {$user->name} logged out",
+      'User',
+      $user->id,
+      null,
+      'info',
+      $user->id
+    );
+
     // Revoke all tokens for the user
-    $request->user()->tokens()->delete();
+    $user->tokens()->delete();
 
     return response()->json([
       'message' => 'Logged out successfully',

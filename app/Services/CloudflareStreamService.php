@@ -76,6 +76,256 @@ class CloudflareStreamService
     }
 
     /**
+     * Upload a file from local filesystem to Cloudflare Stream using TUS protocol
+     *
+     * @param string $filePath - Path to the video file
+     * @param string $fileName - Original filename
+     * @param array $metadata - Video metadata
+     * @return array|null
+     */
+    public function uploadFromFile(string $filePath, string $fileName, array $metadata = [])
+    {
+        if (!$this->isConfigured()) {
+            return $this->getMockResponse();
+        }
+
+        try {
+            $fileSize = filesize($filePath);
+
+            // For files larger than 200MB, use TUS resumable upload
+            if ($fileSize > 200 * 1024 * 1024) {
+                Log::info('Using TUS resumable upload for large file', [
+                    'size' => $fileSize,
+                    'file' => $fileName,
+                ]);
+                return $this->uploadUsingTus($filePath, $fileName, $metadata);
+            }
+
+            // For smaller files, use direct upload
+            Log::info('Using direct upload for small file', [
+                'size' => $fileSize,
+                'file' => $fileName,
+            ]);
+
+            // Extract requireSignedURLs from metadata
+            $requireSignedURLs = $metadata['requireSignedURLs'] ?? false;
+            $meta = $metadata;
+            unset($meta['requireSignedURLs']);
+
+            // Use cURL for file uploads
+            $ch = curl_init();
+
+            $postFields = [
+                'file' => new \CURLFile($filePath, mime_content_type($filePath), $fileName),
+            ];
+
+            if (!empty($meta)) {
+                foreach ($meta as $key => $value) {
+                    $postFields["meta[{$key}]"] = $value;
+                }
+            }
+
+            if ($requireSignedURLs) {
+                $postFields['requireSignedURLs'] = 'true';
+            }
+
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $this->baseUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => $postFields,
+                CURLOPT_HTTPHEADER => [
+                    'Authorization: Bearer ' . $this->apiToken,
+                ],
+                CURLOPT_TIMEOUT => 7200, // 2 hour timeout
+            ]);
+
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            if ($error) {
+                Log::error('Cloudflare upload cURL error', ['error' => $error]);
+                return null;
+            }
+
+            if ($httpCode >= 200 && $httpCode < 300) {
+                $data = json_decode($response, true);
+                Log::info('Cloudflare upload successful', ['uid' => $data['result']['uid'] ?? 'unknown']);
+                return $data['result'] ?? null;
+            }
+
+            Log::error('Cloudflare upload failed', [
+                'status' => $httpCode,
+                'body' => $response,
+            ]);
+
+            return null;
+        } catch (\Exception $e) {
+            Log::error('Cloudflare upload exception', [
+                'message' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Upload large file using TUS resumable upload protocol
+     *
+     * @param string $filePath
+     * @param string $fileName
+     * @param array $metadata
+     * @return array|null
+     */
+    protected function uploadUsingTus(string $filePath, string $fileName, array $metadata = [])
+    {
+        try {
+            $fileSize = filesize($filePath);
+
+            // Step 1: Create TUS upload session
+            // Separate TUS metadata (headers) from POST body metadata
+            $tusMetadata = [];
+            $bodyMetadata = [
+                'maxDurationSeconds' => 21600,
+            ];
+
+            // Handle requireSignedURLs in POST body
+            if (isset($metadata['requireSignedURLs'])) {
+                $bodyMetadata['requireSignedURLs'] = (bool) $metadata['requireSignedURLs'];
+            }
+
+            // Add other metadata to TUS headers (excluding requireSignedURLs)
+            foreach ($metadata as $key => $value) {
+                if ($key !== 'requireSignedURLs' && $key !== 'name') {
+                    $tusMetadata[] = $key . ' ' . base64_encode($value);
+                }
+            }
+            $tusMetadata[] = 'name ' . base64_encode($fileName);
+
+            // Capture response headers
+            $responseHeaders = [];
+
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $this->baseUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode($bodyMetadata),
+                CURLOPT_HTTPHEADER => [
+                    'Authorization: Bearer ' . $this->apiToken,
+                    'Tus-Resumable: 1.0.0',
+                    'Upload-Length: ' . $fileSize,
+                    'Upload-Metadata: ' . implode(',', $tusMetadata),
+                    'Content-Type: application/json',
+                ],
+                CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$responseHeaders) {
+                    $len = strlen($header);
+                    $header = explode(':', $header, 2);
+                    if (count($header) < 2) return $len;
+                    $responseHeaders[strtolower(trim($header[0]))] = trim($header[1]);
+                    return $len;
+                }
+            ]);
+
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($httpCode !== 201) {
+                Log::error('TUS session creation failed', ['status' => $httpCode, 'body' => $response]);
+                return null;
+            }
+
+            // TUS returns upload URL in Location header and stream UID in stream-media-id header
+            $uploadUrl = $responseHeaders['location'] ?? null;
+            $videoUid = $responseHeaders['stream-media-id'] ?? null;
+
+            // Log the full response for debugging
+            Log::info('TUS session response', [
+                'status' => $httpCode,
+                'headers' => $responseHeaders,
+                'upload_url' => $uploadUrl,
+                'video_uid' => $videoUid,
+            ]);
+
+            if (!$uploadUrl || !$videoUid) {
+                Log::error('TUS response missing upload URL or UID', [
+                    'headers' => $responseHeaders,
+                ]);
+                return null;
+            }
+
+            Log::info('TUS session created', ['uid' => $videoUid, 'upload_url' => $uploadUrl]);
+
+            // Step 2: Upload file in chunks using TUS protocol
+            $fp = fopen($filePath, 'rb');
+            $offset = 0;
+            $chunkSize = 50 * 1024 * 1024; // 50MB chunks
+
+            while (!feof($fp)) {
+                $chunk = fread($fp, $chunkSize);
+                $chunkLength = strlen($chunk);
+
+                $ch = curl_init();
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $uploadUrl,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_CUSTOMREQUEST => 'PATCH',
+                    CURLOPT_POSTFIELDS => $chunk,
+                    CURLOPT_HTTPHEADER => [
+                        'Authorization: Bearer ' . $this->apiToken,
+                        'Tus-Resumable: 1.0.0',
+                        'Upload-Offset: ' . $offset,
+                        'Content-Type: application/offset+octet-stream',
+                        'Content-Length: ' . $chunkLength,
+                    ],
+                    CURLOPT_TIMEOUT => 3600,
+                ]);
+
+                $response = curl_exec($ch);
+                $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_close($ch);
+
+                if ($httpCode !== 204) {
+                    Log::error('TUS chunk upload failed', [
+                        'status' => $httpCode,
+                        'offset' => $offset,
+                        'body' => $response,
+                    ]);
+                    fclose($fp);
+                    return null;
+                }
+
+                $offset += $chunkLength;
+                Log::info('TUS chunk uploaded', [
+                    'offset' => $offset,
+                    'total' => $fileSize,
+                    'progress' => round(($offset / $fileSize) * 100, 2) . '%',
+                ]);
+            }
+
+            fclose($fp);
+
+            Log::info('TUS upload completed', ['uid' => $videoUid]);
+
+            // Return video details
+            return [
+                'uid' => $videoUid,
+                'status' => ['state' => 'pending'],
+                'readyToStream' => false,
+            ];
+
+        } catch (\Exception $e) {
+            Log::error('TUS upload exception', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
      * Upload video from URL - Cloudflare fetches the URL directly
      * This is the recommended approach and has no file size limit
      *
@@ -537,6 +787,79 @@ class CloudflareStreamService
             ]);
             return false;
         }
+    }
+
+    /**
+     * Get available video qualities for a video
+     *
+     * @param string $videoUid
+     * @return array - Returns array of available qualities with processing status
+     */
+    public function getAvailableQualities(string $videoUid): array
+    {
+        $video = $this->getVideo($videoUid);
+
+        if (!$video) {
+            return [
+                'ready' => false,
+                'qualities' => [],
+                'status' => 'error',
+            ];
+        }
+
+        $result = [
+            'ready' => $video['readyToStream'] ?? false,
+            'status' => $video['status']['state'] ?? 'unknown',
+            'qualities' => [],
+            'input' => [
+                'width' => $video['input']['width'] ?? null,
+                'height' => $video['input']['height'] ?? null,
+            ],
+        ];
+
+        // Check playback variants for available qualities
+        if (isset($video['playback']['hls'])) {
+            // HLS is available - fetch the manifest to detect qualities
+            $result['hls_available'] = true;
+        }
+
+        // Cloudflare doesn't directly expose quality list in API
+        // But we can infer based on input resolution and status
+        if ($result['ready'] && isset($video['input']['height'])) {
+            $inputHeight = $video['input']['height'];
+
+            // Cloudflare generates these qualities based on input
+            $possibleQualities = [
+                ['height' => 1080, 'label' => '1080p'],
+                ['height' => 720, 'label' => '720p'],
+                ['height' => 480, 'label' => '480p'],
+                ['height' => 360, 'label' => '360p'],
+            ];
+
+            foreach ($possibleQualities as $quality) {
+                if ($quality['height'] <= $inputHeight) {
+                    $result['qualities'][] = $quality['label'];
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Check if video transcoding is complete with all qualities
+     *
+     * @param string $videoUid
+     * @return bool
+     */
+    public function isTranscodingComplete(string $videoUid): bool
+    {
+        $qualities = $this->getAvailableQualities($videoUid);
+
+        // Video is considered fully transcoded when:
+        // 1. Status is ready
+        // 2. readyToStream is true
+        return $qualities['ready'] === true && $qualities['status'] === 'ready';
     }
 
     /**

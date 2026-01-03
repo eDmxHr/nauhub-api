@@ -16,6 +16,7 @@ class Episode extends Model
         'description',
         'thumbnail',
         'cloudflare_video_uid',
+        'status',
         'duration',
         'release_date',
         'is_published',
