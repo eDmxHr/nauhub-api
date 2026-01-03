@@ -17,6 +17,8 @@ use App\Http\Controllers\Api\IntegrationController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ActivityLogController;
+use App\Http\Controllers\Api\AdminNotificationController;
+use App\Http\Controllers\Api\SystemConfigController;
 
 /*
 |--------------------------------------------------------------------------
@@ -262,5 +264,27 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::get('/{id}', [ActivityLogController::class, 'show']); // Get single activity log
     Route::get('/entity/{entityType}/{entityId}', [ActivityLogController::class, 'byEntity']); // Get logs for specific entity
     Route::delete('/cleanup', [ActivityLogController::class, 'cleanup']); // Cleanup old logs
+  });
+
+  // Admin: Notifications
+  Route::prefix('notifications')->group(function () {
+    Route::get('/', [AdminNotificationController::class, 'index']); // List all notifications with filters
+    Route::get('/stats', [AdminNotificationController::class, 'stats']); // Get notification statistics
+    Route::get('/{id}', [AdminNotificationController::class, 'show']); // Get single notification (auto-marks as read)
+    Route::put('/{id}/read', [AdminNotificationController::class, 'markAsRead']); // Mark as read
+    Route::put('/{id}/unread', [AdminNotificationController::class, 'markAsUnread']); // Mark as unread
+    Route::put('/mark-all-read', [AdminNotificationController::class, 'markAllAsRead']); // Mark all as read
+    Route::delete('/{id}', [AdminNotificationController::class, 'destroy']); // Delete notification
+    Route::delete('/cleanup', [AdminNotificationController::class, 'cleanup']); // Cleanup old notifications
+  });
+
+  // Admin: System Configuration
+  Route::prefix('config')->group(function () {
+    Route::get('/', [SystemConfigController::class, 'index']); // Get all configs (grouped)
+    Route::get('/groups', [SystemConfigController::class, 'groups']); // Get available groups
+    Route::get('/{key}', [SystemConfigController::class, 'show']); // Get single config
+    Route::put('/{key}', [SystemConfigController::class, 'update']); // Update single config
+    Route::put('/', [SystemConfigController::class, 'bulkUpdate']); // Bulk update configs
+    Route::post('/clear-cache', [SystemConfigController::class, 'clearCache']); // Clear config cache
   });
 });
