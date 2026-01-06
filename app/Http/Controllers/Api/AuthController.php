@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\OtpVerification;
 use App\Models\ActivityLog;
+use App\Models\BlockedIp;
 use Illuminate\Http\Request;
 
 class AuthController extends Controller
@@ -24,13 +25,16 @@ class AuthController extends Controller
     $user = User::where('email', $validated['email'])->first();
 
     if (!$user || !\Hash::check($validated['password'], $user->password)) {
+      // Track failed login attempt
+      BlockedIp::trackFailedAttempt($request->ip());
+
       // Log failed login attempt
       ActivityLog::log(
         'login_failed',
         "Failed login attempt for email: {$validated['email']}",
         'User',
         $user?->id,
-        ['email' => $validated['email']],
+        ['email' => $validated['email'], 'ip_address' => $request->ip()],
         'warning',
         $user?->id
       );
@@ -56,6 +60,9 @@ class AuthController extends Controller
         'message' => 'Your account has been deactivated. Please contact support.',
       ], 403);
     }
+
+    // Reset failed login attempts on successful login
+    BlockedIp::resetFailedAttempts($request->ip());
 
     // Create token
     $token = $user->createToken('auth_token')->plainTextToken;

@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\SystemConfigController;
+use App\Http\Controllers\Api\IpBlockController;
 
 /*
 |--------------------------------------------------------------------------
@@ -286,5 +287,19 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::put('/{key}', [SystemConfigController::class, 'update']); // Update single config
     Route::put('/', [SystemConfigController::class, 'bulkUpdate']); // Bulk update configs
     Route::post('/clear-cache', [SystemConfigController::class, 'clearCache']); // Clear config cache
+  });
+
+  // Admin: IP Blocking
+  Route::prefix('blocked-ips')->group(function () {
+    Route::get('/', [IpBlockController::class, 'index']); // List all blocked IPs with filters
+    Route::get('/stats', [IpBlockController::class, 'stats']); // Get IP blocking statistics
+    Route::post('/', [IpBlockController::class, 'store']); // Block an IP address
+    Route::get('/check/{ip}', [IpBlockController::class, 'check']); // Check if IP is blocked
+    Route::get('/{id}', [IpBlockController::class, 'show']); // Get single blocked IP
+    Route::put('/{id}', [IpBlockController::class, 'update']); // Update blocked IP
+    Route::delete('/{id}', [IpBlockController::class, 'destroy']); // Unblock IP
+    Route::post('/bulk-unblock', [IpBlockController::class, 'bulkUnblock']); // Bulk unblock IPs
+    Route::post('/cleanup', [IpBlockController::class, 'cleanup']); // Clean up expired blocks
+    Route::post('/{id}/reset-attempts', [IpBlockController::class, 'resetAttempts']); // Reset failed login attempts
   });
 });

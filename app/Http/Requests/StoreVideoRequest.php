@@ -30,6 +30,7 @@ class StoreVideoRequest extends FormRequest
             'banner' => ['nullable', 'url', 'max:500'],
             'cloudflare_video_uid' => ['nullable', 'string', 'max:255'],
             'duration' => ['nullable', 'integer', 'min:0'],
+            'quality' => ['nullable', 'string', 'max:50'],
             'release_year' => ['nullable', 'integer', 'min:1900', 'max:' . (date('Y') + 5)],
             'age_rating' => ['nullable', 'string', Rule::in(['G', 'PG', 'PG-13', 'R', 'NC-17', 'TV-Y', 'TV-Y7', 'TV-G', 'TV-PG', 'TV-14', 'TV-MA'])],
             'imdb_rating' => ['nullable', 'numeric', 'min:0', 'max:10'],

@@ -2,6 +2,7 @@
 
 use Illuminate\Foundation\Application;
 use App\Http\Middleware\AdminMiddleware;
+use App\Http\Middleware\BlockedIpMiddleware;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use App\Models\ActivityLog;
@@ -21,8 +22,15 @@ return Application::configure(basePath: dirname(__DIR__))
     health: '/up',
   )
   ->withMiddleware(function (Middleware $middleware): void {
+    // Register middleware aliases
     $middleware->alias([
       'admin' => AdminMiddleware::class,
+      'blocked.ip' => BlockedIpMiddleware::class,
+    ]);
+
+    // Apply IP blocking to all API routes
+    $middleware->group('api', [
+      BlockedIpMiddleware::class,
     ]);
   })
   ->withExceptions(function (Exceptions $exceptions): void {
