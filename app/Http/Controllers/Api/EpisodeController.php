@@ -53,6 +53,7 @@ class EpisodeController extends Controller
             'cloudflare_video_uid' => 'nullable|string|max:255',
             'magnet_url' => 'nullable|string',
             'duration' => 'nullable|integer|min:0',
+            'quality' => 'nullable|string|max:50',
             'release_date' => 'nullable|date',
             'is_published' => 'nullable|boolean',
         ]);
@@ -94,12 +95,7 @@ class EpisodeController extends Controller
             }
         }
 
-        // Require either cloudflare_video_uid or magnet_url
-        if (empty($validated['cloudflare_video_uid'])) {
-            return response()->json([
-                'message' => 'Either cloudflare_video_uid or magnet_url is required',
-            ], 400);
-        }
+        // Note: cloudflare_video_uid can be added later via update or file upload endpoints
 
         $episode = Episode::create($validated);
 
@@ -148,6 +144,7 @@ class EpisodeController extends Controller
             'thumbnail' => 'nullable|string|max:500',
             'cloudflare_video_uid' => 'nullable|string|max:255',
             'duration' => 'nullable|integer|min:0',
+            'quality' => 'nullable|string|max:50',
             'release_date' => 'nullable|date',
             'is_published' => 'nullable|boolean',
         ]);

@@ -49,7 +49,46 @@ class CloudflareController extends Controller
     }
 
     /**
+     * Generate a direct upload URL for client-side upload (Admin only).
+     * This allows uploading large files directly to Cloudflare without going through your server.
+     *
+     * Returns a unique upload URL that your frontend can use to upload videos directly to Cloudflare.
+     * This bypasses PHP file size limits completely.
+     */
+    public function createDirectUploadUrl(Request $request)
+    {
+        $validated = $request->validate([
+            'max_duration_seconds' => 'nullable|integer|min:1|max:21600', // Max 6 hours
+        ]);
+
+        $maxDuration = $validated['max_duration_seconds'] ?? 21600; // Default 6 hours
+
+        $result = $this->cloudflare->createDirectUploadUrl($maxDuration);
+
+        if ($result) {
+            return response()->json([
+                'message' => 'Direct upload URL created successfully',
+                'upload_url' => $result['uploadURL'],
+                'video_uid' => $result['uid'],
+                'instructions' => [
+                    'method' => 'POST',
+                    'url' => $result['uploadURL'],
+                    'body' => 'Send the video file as multipart/form-data with field name "file"',
+                    'note' => 'Upload directly from your frontend to this URL to bypass PHP file size limits',
+                ],
+            ], 201);
+        }
+
+        return response()->json([
+            'message' => 'Failed to create direct upload URL',
+        ], 500);
+    }
+
+    /**
      * Upload a video file to Cloudflare Stream (Admin only).
+     *
+     * Note: This method uploads through your PHP server and has file size limits (40MB by default).
+     * For large files, use createDirectUploadUrl instead to upload directly to Cloudflare.
      */
     public function uploadVideo(Request $request)
     {
@@ -141,10 +180,21 @@ class CloudflareController extends Controller
     public function uploadFromMagnet(Request $request)
     {
         $validated = $request->validate([
-            'magnet_url' => 'required|string',
+            'magnet_url' => 'nullable|string',
             'title' => 'required|string|max:255',
             'description' => 'nullable|string',
         ]);
+
+        // If no magnet URL provided, just return success (useful for creating video entry first)
+        if (empty($validated['magnet_url'])) {
+            return response()->json([
+                'message' => 'Video information saved. You can upload the file later using direct upload or provide a magnet URL.',
+                'data' => [
+                    'title' => $validated['title'],
+                    'description' => $validated['description'] ?? null,
+                ],
+            ], 200);
+        }
 
         // Step 1: Add transfer to Put.io
         $transferResult = $this->putio->addTransfer($validated['magnet_url']);
@@ -347,22 +397,54 @@ class CloudflareController extends Controller
     }
 
     /**
-     * Get upload status for a video (Admin only).
+     * Get upload/processing status for a video (Admin only).
+     * Use this endpoint to poll for progress after direct upload.
      */
     public function getUploadStatus($videoUid)
     {
-        $status = $this->cloudflare->getUploadStatus($videoUid);
+        $video = $this->cloudflare->getVideo($videoUid);
 
-        if ($status) {
+        if (!$video) {
             return response()->json([
-                'message' => 'Upload status retrieved',
-                'status' => $status,
-            ]);
+                'message' => 'Video not found or still uploading',
+                'status' => [
+                    'state' => 'uploading',
+                    'ready' => false,
+                    'progress' => 0,
+                ],
+            ], 404);
         }
 
+        // Parse Cloudflare status
+        $state = $video['status']['state'] ?? 'unknown';
+        $ready = $video['readyToStream'] ?? false;
+
+        // Map state to progress percentage
+        $progressMap = [
+            'uploading' => 25,
+            'queued' => 30,
+            'inprogress' => 50,
+            'downloading' => 40,
+            'pendingupload' => 20,
+            'ready' => 100,
+            'error' => 0,
+        ];
+
+        $progress = $progressMap[$state] ?? 0;
+
         return response()->json([
-            'message' => 'Could not retrieve upload status',
-        ], 404);
+            'message' => 'Upload status retrieved',
+            'video_uid' => $videoUid,
+            'status' => [
+                'state' => $state,
+                'ready' => $ready,
+                'progress' => $progress,
+                'duration' => $video['duration'] ?? null,
+                'size' => $video['size'] ?? null,
+            ],
+            'meta' => $video['meta'] ?? null,
+            'note' => $ready ? 'Video is ready to stream' : 'Video is still processing. Poll this endpoint to check progress.',
+        ]);
     }
 
     /**

@@ -18,6 +18,7 @@ class Episode extends Model
         'cloudflare_video_uid',
         'status',
         'duration',
+        'quality',         // e.g., "1080p", "720p", "4K", "HD", "SD"
         'release_date',
         'is_published',
         'view_count',

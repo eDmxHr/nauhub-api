@@ -49,10 +49,48 @@ Route::prefix('auth')->group(function () {
   Route::post('/verify-otp', [AuthController::class, 'verifyOtp']);
 });
 
+// Public browsing routes (no auth required - anyone can browse)
+Route::prefix('videos')->group(function () {
+  Route::get('/', [VideoController::class, 'index']); // Paginated listing with filters
+  Route::get('/featured', [VideoController::class, 'featured']); // Featured videos
+  Route::get('/trending', [VideoController::class, 'trending']); // Trending videos
+  Route::get('/{id}', [VideoController::class, 'show']); // Single video details
+});
+
+Route::prefix('categories')->group(function () {
+  Route::get('/', [CategoryController::class, 'index']); // All categories
+  Route::get('/{id}', [CategoryController::class, 'show']); // Single category
+});
+
+Route::prefix('genres')->group(function () {
+  Route::get('/', [GenreController::class, 'index']); // All genres
+  Route::get('/{id}', [GenreController::class, 'show']); // Single genre
+});
+
+Route::prefix('videos/{videoId}/seasons')->group(function () {
+  Route::get('/', [SeasonController::class, 'index']); // Get all seasons for a video
+});
+
+Route::prefix('seasons')->group(function () {
+  Route::get('/{id}', [SeasonController::class, 'show']); // Get single season with episodes
+});
+
+Route::prefix('seasons/{seasonId}/episodes')->group(function () {
+  Route::get('/', [EpisodeController::class, 'index']); // Get all episodes for a season
+});
+
+Route::prefix('episodes')->group(function () {
+  Route::get('/{id}', [EpisodeController::class, 'show']); // Get single episode
+});
+
+Route::prefix('subscriptions')->group(function () {
+  Route::get('/plans', [SubscriptionController::class, 'plans']); // Get all subscription plans (public)
+});
+
 // Protected routes (require authentication token)
 Route::middleware('auth:sanctum')->group(function () {
 
-  // Auth routes
+  // Auth routes (authenticated)
   Route::prefix('auth')->group(function () {
     // Get authenticated user
     // GET /api/auth/user
@@ -63,7 +101,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
   });
 
-  // Profile routes
+  // Profile routes (authenticated)
   Route::prefix('profiles')->group(function () {
     Route::get('/', [ProfileController::class, 'index']);
     Route::post('/', [ProfileController::class, 'store']);
@@ -73,44 +111,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/{id}/verify-pin', [ProfileController::class, 'verifyPin']);
   });
 
-  // Public video routes (for browsing)
-  Route::prefix('videos')->group(function () {
-    Route::get('/', [VideoController::class, 'index']); // Paginated listing with filters
-    Route::get('/featured', [VideoController::class, 'featured']); // Featured videos
-    Route::get('/trending', [VideoController::class, 'trending']); // Trending videos
-    Route::get('/{id}', [VideoController::class, 'show']); // Single video details
-    Route::post('/{id}/view', [VideoController::class, 'incrementView']); // Increment view count
+  // Video interaction routes (require auth to track views)
+  Route::prefix('videos/{id}')->group(function () {
+    Route::post('/view', [VideoController::class, 'incrementView']); // Increment view count
   });
 
-  // Public category routes
-  Route::prefix('categories')->group(function () {
-    Route::get('/', [CategoryController::class, 'index']); // All categories
-    Route::get('/{id}', [CategoryController::class, 'show']); // Single category
-  });
-
-  // Public genre routes
-  Route::prefix('genres')->group(function () {
-    Route::get('/', [GenreController::class, 'index']); // All genres
-    Route::get('/{id}', [GenreController::class, 'show']); // Single genre
-  });
-
-  // Public season routes
-  Route::prefix('videos/{videoId}/seasons')->group(function () {
-    Route::get('/', [SeasonController::class, 'index']); // Get all seasons for a video
-  });
-
-  Route::prefix('seasons')->group(function () {
-    Route::get('/{id}', [SeasonController::class, 'show']); // Get single season with episodes
-  });
-
-  // Public episode routes
-  Route::prefix('seasons/{seasonId}/episodes')->group(function () {
-    Route::get('/', [EpisodeController::class, 'index']); // Get all episodes for a season
-  });
-
-  Route::prefix('episodes')->group(function () {
-    Route::get('/{id}', [EpisodeController::class, 'show']); // Get single episode
-    Route::post('/{id}/view', [EpisodeController::class, 'incrementView']); // Increment episode view count
+  Route::prefix('episodes/{id}')->group(function () {
+    Route::post('/view', [EpisodeController::class, 'incrementView']); // Increment episode view count
   });
 
   // Watch History routes
@@ -139,9 +146,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/{id}/videos', [PlaylistController::class, 'removeVideo']); // Remove video from custom playlist
   });
 
-  // Subscription routes (user)
+  // Subscription routes (authenticated user only)
   Route::prefix('subscriptions')->group(function () {
-    Route::get('/plans', [SubscriptionController::class, 'plans']); // Get all subscription plans
     Route::get('/status', [SubscriptionController::class, 'status']); // Get current user subscription status
     Route::post('/subscribe', [SubscriptionController::class, 'subscribe']); // Subscribe with payment proof
     Route::get('/history', [SubscriptionController::class, 'history']); // Get subscription history
@@ -221,7 +227,8 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
   // Admin: Cloudflare Stream & Put.io management
   Route::prefix('cloudflare')->group(function () {
     Route::get('/test-connection', [CloudflareController::class, 'testConnection']); // Test Cloudflare API connection
-    Route::post('/upload-video', [CloudflareController::class, 'uploadVideo']); // Upload video file directly
+    Route::post('/create-direct-upload-url', [CloudflareController::class, 'createDirectUploadUrl']); // Generate direct upload URL (bypasses PHP)
+    Route::post('/upload-video', [CloudflareController::class, 'uploadVideo']); // Upload video file through PHP (40MB limit)
     Route::post('/upload-from-url', [CloudflareController::class, 'uploadFromUrl']); // Upload from any direct URL
     Route::post('/upload-from-magnet', [CloudflareController::class, 'uploadFromMagnet']); // Step 1: Add magnet to Put.io (returns immediately)
     Route::get('/transfer/{transferId}/status', [CloudflareController::class, 'checkTransferStatus']); // Step 2: Check Put.io download status
