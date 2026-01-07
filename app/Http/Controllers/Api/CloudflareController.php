@@ -61,14 +61,15 @@ class CloudflareController extends Controller
     public function createDirectUploadUrl(Request $request)
     {
         $validated = $request->validate([
-            'max_duration_seconds' => 'nullable|integer|min:1|max:21600', // Max 6 hours
+            'max_duration_seconds' => 'nullable|integer|min:1|max:21600', // Max 6 hours (optional - only set if you know the video duration)
             'use_tus' => 'nullable|boolean',
             'file_size' => 'nullable|integer|min:0', // File size in bytes
             'video_uid' => 'nullable|string', // Optional: existing video UID to reuse
             'idempotency_key' => 'nullable|string|max:255', // Optional: idempotency key to prevent duplicate endpoints
         ]);
 
-        $maxDuration = $validated['max_duration_seconds'] ?? 21600; // Default 6 hours
+        // Only use maxDurationSeconds if explicitly provided - don't default to 6 hours
+        $maxDuration = $validated['max_duration_seconds'] ?? null;
         $useTus = $validated['use_tus'] ?? false;
         $fileSize = $validated['file_size'] ?? 0;
         $existingVideoUid = $validated['video_uid'] ?? null;
@@ -86,7 +87,7 @@ class CloudflareController extends Controller
             
             $idempotencyKey = $providedKey 
                 ? md5($providedKey) 
-                : md5($fileSize . '_' . $maxDuration . '_' . $userId . '_' . $sessionId);
+                : md5($fileSize . '_' . ($maxDuration ?? 'none') . '_' . $userId . '_' . $sessionId);
             $cacheKey = 'tus_endpoint_' . $idempotencyKey;
             
             // Check if we recently created an endpoint for this request
@@ -160,7 +161,11 @@ class CloudflareController extends Controller
                     'video_uid' => $result['uid'] ?? null,
                     'upload_type' => 'tus',
                     'file_size' => $fileSize,
+                    'max_duration_seconds' => $maxDuration,
                     'warning' => 'Only call this endpoint once per upload. Reuse the tus_endpoint for all chunks.',
+                    'note' => $maxDuration 
+                        ? "max_duration_seconds set to {$maxDuration} seconds. Only set this if you know the actual video duration."
+                        : 'max_duration_seconds not set. Cloudflare will determine duration from the uploaded file.',
                     'instructions' => [
                         'resumability' => [
                             'step_1' => 'Before starting/resuming upload, send HEAD request to tus_endpoint to get current Upload-Offset',

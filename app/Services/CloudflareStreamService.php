@@ -445,10 +445,10 @@ class CloudflareStreamService
      * Create a TUS resumable upload endpoint for client-side uploads
      *
      * @param int $fileSize File size in bytes
-     * @param int $maxDurationSeconds Maximum duration in seconds (default: 6 hours)
+     * @param int|null $maxDurationSeconds Maximum duration in seconds (optional - only set if known)
      * @return array|null Returns array with 'tus_endpoint' (Location header) and optionally 'uid'
      */
-    public function createTusUploadEndpoint(int $fileSize, int $maxDurationSeconds = 21600)
+    public function createTusUploadEndpoint(int $fileSize, ?int $maxDurationSeconds = null)
     {
         if (!$this->isConfigured()) {
             return [
@@ -459,16 +459,20 @@ class CloudflareStreamService
 
         try {
             // Prepare POST body metadata (sent as JSON)
-            $bodyMetadata = [
-                'maxDurationSeconds' => $maxDurationSeconds,
-            ];
+            // Only include maxDurationSeconds if explicitly provided
+            $bodyMetadata = [];
+            if ($maxDurationSeconds !== null) {
+                $bodyMetadata['maxDurationSeconds'] = $maxDurationSeconds;
+            }
 
             // Prepare TUS Upload-Metadata header (base64 encoded)
             // Format: key base64value,key2 base64value2
-            $uploadMetadata = [
-                'maxDurationSeconds ' . base64_encode((string)$maxDurationSeconds),
-            ];
-            $uploadMetadataHeader = implode(',', $uploadMetadata);
+            // Only include maxDurationSeconds in metadata if provided
+            $uploadMetadata = [];
+            if ($maxDurationSeconds !== null) {
+                $uploadMetadata[] = 'maxDurationSeconds ' . base64_encode((string)$maxDurationSeconds);
+            }
+            $uploadMetadataHeader = !empty($uploadMetadata) ? implode(',', $uploadMetadata) : '';
 
             // Call Cloudflare TUS endpoint with direct_user=true
             $url = "{$this->baseUrl}?direct_user=true";
@@ -477,18 +481,25 @@ class CloudflareStreamService
             $ch = curl_init();
             $responseHeaders = [];
 
+            // Build headers array
+            $headers = [
+                'Authorization: Bearer ' . $this->apiToken,
+                'Tus-Resumable: 1.0.0',
+                'Upload-Length: ' . $fileSize,
+                'Content-Type: application/json',
+            ];
+            
+            // Only add Upload-Metadata header if we have metadata
+            if (!empty($uploadMetadataHeader)) {
+                $headers[] = 'Upload-Metadata: ' . $uploadMetadataHeader;
+            }
+
             curl_setopt_array($ch, [
                 CURLOPT_URL => $url,
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_POST => true,
                 CURLOPT_POSTFIELDS => json_encode($bodyMetadata),
-                CURLOPT_HTTPHEADER => [
-                    'Authorization: Bearer ' . $this->apiToken,
-                    'Tus-Resumable: 1.0.0',
-                    'Upload-Length: ' . $fileSize,
-                    'Upload-Metadata: ' . $uploadMetadataHeader,
-                    'Content-Type: application/json',
-                ],
+                CURLOPT_HTTPHEADER => $headers,
                 CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$responseHeaders) {
                     $len = strlen($header);
                     $header = explode(':', $header, 2);
