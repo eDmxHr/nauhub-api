@@ -442,6 +442,115 @@ class CloudflareStreamService
     }
 
     /**
+     * Create a TUS resumable upload endpoint for client-side uploads
+     *
+     * @param int $fileSize File size in bytes
+     * @param int $maxDurationSeconds Maximum duration in seconds (default: 6 hours)
+     * @return array|null Returns array with 'tus_endpoint' (Location header) and optionally 'uid'
+     */
+    public function createTusUploadEndpoint(int $fileSize, int $maxDurationSeconds = 21600)
+    {
+        if (!$this->isConfigured()) {
+            return [
+                'tus_endpoint' => 'https://upload.videodelivery.net/mock-tus',
+                'uid' => 'mock_' . uniqid(),
+            ];
+        }
+
+        try {
+            // Prepare POST body metadata (sent as JSON)
+            $bodyMetadata = [
+                'maxDurationSeconds' => $maxDurationSeconds,
+            ];
+
+            // Prepare TUS Upload-Metadata header (base64 encoded)
+            // Format: key base64value,key2 base64value2
+            $uploadMetadata = [
+                'maxDurationSeconds ' . base64_encode((string)$maxDurationSeconds),
+            ];
+            $uploadMetadataHeader = implode(',', $uploadMetadata);
+
+            // Call Cloudflare TUS endpoint with direct_user=true
+            $url = "{$this->baseUrl}?direct_user=true";
+
+            // Use cURL to capture response headers
+            $ch = curl_init();
+            $responseHeaders = [];
+
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode($bodyMetadata),
+                CURLOPT_HTTPHEADER => [
+                    'Authorization: Bearer ' . $this->apiToken,
+                    'Tus-Resumable: 1.0.0',
+                    'Upload-Length: ' . $fileSize,
+                    'Upload-Metadata: ' . $uploadMetadataHeader,
+                    'Content-Type: application/json',
+                ],
+                CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$responseHeaders) {
+                    $len = strlen($header);
+                    $header = explode(':', $header, 2);
+                    if (count($header) < 2) return $len;
+                    $responseHeaders[strtolower(trim($header[0]))] = trim($header[1]);
+                    return $len;
+                },
+            ]);
+
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            if ($error) {
+                Log::error('TUS endpoint creation cURL error', ['error' => $error]);
+                return null;
+            }
+
+            if ($httpCode === 201) {
+                // TUS endpoint returns 201 Created with Location header
+                $tusEndpoint = $responseHeaders['location'] ?? null;
+                $videoUid = $responseHeaders['stream-media-id'] ?? null;
+
+                if (!$tusEndpoint) {
+                    Log::error('TUS endpoint creation missing Location header', [
+                        'status' => $httpCode,
+                        'headers' => $responseHeaders,
+                        'body' => $response,
+                    ]);
+                    return null;
+                }
+
+                Log::info('TUS upload endpoint created successfully', [
+                    'tus_endpoint' => $tusEndpoint,
+                    'video_uid' => $videoUid,
+                    'file_size' => $fileSize,
+                ]);
+
+                return [
+                    'tus_endpoint' => $tusEndpoint,
+                    'uid' => $videoUid,
+                ];
+            }
+
+            Log::error('Failed to create TUS upload endpoint', [
+                'status' => $httpCode,
+                'headers' => $responseHeaders,
+                'body' => $response,
+            ]);
+
+            return null;
+        } catch (\Exception $e) {
+            Log::error('Create TUS upload endpoint exception', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
      * Get video details from Cloudflare Stream
      *
      * @param string $videoUid

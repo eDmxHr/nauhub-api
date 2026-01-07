@@ -54,15 +54,53 @@ class CloudflareController extends Controller
      *
      * Returns a unique upload URL that your frontend can use to upload videos directly to Cloudflare.
      * This bypasses PHP file size limits completely.
+     *
+     * For files >= 200MB or when use_tus is true, returns a TUS resumable upload endpoint.
      */
     public function createDirectUploadUrl(Request $request)
     {
         $validated = $request->validate([
             'max_duration_seconds' => 'nullable|integer|min:1|max:21600', // Max 6 hours
+            'use_tus' => 'nullable|boolean',
+            'file_size' => 'nullable|integer|min:0', // File size in bytes
         ]);
 
         $maxDuration = $validated['max_duration_seconds'] ?? 21600; // Default 6 hours
+        $useTus = $validated['use_tus'] ?? false;
+        $fileSize = $validated['file_size'] ?? 0;
+        
+        // Check if TUS should be used: use_tus is true OR file_size >= 200MB
+        $shouldUseTus = $useTus || ($fileSize >= 200 * 1024 * 1024);
 
+        if ($shouldUseTus) {
+            // Use TUS resumable upload for large files
+            $result = $this->cloudflare->createTusUploadEndpoint($fileSize, $maxDuration);
+
+            if ($result) {
+                return response()->json([
+                    'message' => 'TUS upload endpoint created successfully',
+                    'tus_endpoint' => $result['tus_endpoint'],
+                    'video_uid' => $result['uid'] ?? null,
+                    'upload_type' => 'tus',
+                    'instructions' => [
+                        'method' => 'POST',
+                        'url' => $result['tus_endpoint'],
+                        'headers' => [
+                            'Tus-Resumable: 1.0.0',
+                            'Upload-Length: ' . $fileSize,
+                            'Upload-Offset: 0',
+                        ],
+                        'note' => 'Use TUS protocol for resumable uploads. Upload file in chunks using PATCH requests.',
+                    ],
+                ], 201);
+            }
+
+            return response()->json([
+                'message' => 'Failed to create TUS upload endpoint',
+            ], 500);
+        }
+
+        // Use regular direct upload for smaller files
         $result = $this->cloudflare->createDirectUploadUrl($maxDuration);
 
         if ($result) {
@@ -70,6 +108,7 @@ class CloudflareController extends Controller
                 'message' => 'Direct upload URL created successfully',
                 'upload_url' => $result['uploadURL'],
                 'video_uid' => $result['uid'],
+                'upload_type' => 'direct',
                 'instructions' => [
                     'method' => 'POST',
                     'url' => $result['uploadURL'],
