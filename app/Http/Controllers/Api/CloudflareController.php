@@ -7,6 +7,7 @@ use App\Jobs\UploadVideoFromPutio;
 use App\Services\CloudflareStreamService;
 use App\Services\PutioService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 
 class CloudflareController extends Controller
 {
@@ -63,18 +64,94 @@ class CloudflareController extends Controller
             'max_duration_seconds' => 'nullable|integer|min:1|max:21600', // Max 6 hours
             'use_tus' => 'nullable|boolean',
             'file_size' => 'nullable|integer|min:0', // File size in bytes
+            'video_uid' => 'nullable|string', // Optional: existing video UID to reuse
+            'idempotency_key' => 'nullable|string|max:255', // Optional: idempotency key to prevent duplicate endpoints
         ]);
 
         $maxDuration = $validated['max_duration_seconds'] ?? 21600; // Default 6 hours
         $useTus = $validated['use_tus'] ?? false;
         $fileSize = $validated['file_size'] ?? 0;
+        $existingVideoUid = $validated['video_uid'] ?? null;
         
         // Check if TUS should be used: use_tus is true OR file_size >= 200MB
         $shouldUseTus = $useTus || ($fileSize >= 200 * 1024 * 1024);
 
         if ($shouldUseTus) {
+            // Create idempotency key to prevent duplicate endpoint creation
+            // Use provided idempotency_key (frontend should send same key for retries), 
+            // or generate from request data (user + file size + session)
+            $providedKey = $validated['idempotency_key'] ?? $request->header('X-Idempotency-Key');
+            $userId = $request->user()?->id ?? 'guest';
+            $sessionId = $request->header('X-Session-ID') ?? session()->getId();
+            
+            $idempotencyKey = $providedKey 
+                ? md5($providedKey) 
+                : md5($fileSize . '_' . $maxDuration . '_' . $userId . '_' . $sessionId);
+            $cacheKey = 'tus_endpoint_' . $idempotencyKey;
+            
+            // Check if we recently created an endpoint for this request
+            $cachedResult = Cache::get($cacheKey);
+            if ($cachedResult) {
+                \Log::info('Returning cached TUS upload endpoint', [
+                    'file_size' => $fileSize,
+                    'cache_key' => $cacheKey,
+                ]);
+                
+                return response()->json([
+                    'message' => 'TUS upload endpoint retrieved from cache (duplicate request prevented)',
+                    'tus_endpoint' => $cachedResult['tus_endpoint'],
+                    'video_uid' => $cachedResult['uid'] ?? null,
+                    'upload_type' => 'tus',
+                    'file_size' => $fileSize,
+                    'cached' => true,
+                    'warning' => 'This endpoint was already created. Use the tus_endpoint for your upload.',
+                    'instructions' => [
+                        'resumability' => [
+                            'step_1' => 'Before starting/resuming upload, send HEAD request to tus_endpoint to get current Upload-Offset',
+                            'step_2' => 'Use the returned Upload-Offset value for subsequent PATCH requests',
+                            'step_3' => 'If upload fails, check offset again and resume from that point',
+                        ],
+                        'upload_chunks' => [
+                            'method' => 'PATCH',
+                            'url' => $cachedResult['tus_endpoint'],
+                            'headers' => [
+                                'Authorization: Bearer {your_token}',
+                                'Tus-Resumable: 1.0.0',
+                                'Upload-Offset: {current_offset}',
+                                'Content-Type: application/offset+octet-stream',
+                            ],
+                            'chunk_size' => 'Recommended: 10-20MB chunks for better reliability',
+                            'note' => 'Always check Upload-Offset before each chunk to ensure resumability',
+                        ],
+                        'check_progress' => [
+                            'method' => 'HEAD',
+                            'url' => $cachedResult['tus_endpoint'],
+                            'headers' => [
+                                'Authorization: Bearer {your_token}',
+                                'Tus-Resumable: 1.0.0',
+                            ],
+                            'response' => 'Returns Upload-Offset and Upload-Length headers',
+                        ],
+                    ],
+                ], 200);
+            }
+
+            // Log the request to track duplicate calls
+            \Log::info('Creating TUS upload endpoint', [
+                'file_size' => $fileSize,
+                'use_tus' => $useTus,
+                'existing_video_uid' => $existingVideoUid,
+                'idempotency_key' => $idempotencyKey,
+                'request_id' => $request->header('X-Request-ID', uniqid()),
+            ]);
+
             // Use TUS resumable upload for large files
             $result = $this->cloudflare->createTusUploadEndpoint($fileSize, $maxDuration);
+            
+            // Cache the result for 5 minutes to prevent duplicate creation
+            if ($result) {
+                Cache::put($cacheKey, $result, now()->addMinutes(5));
+            }
 
             if ($result) {
                 return response()->json([
@@ -82,21 +159,43 @@ class CloudflareController extends Controller
                     'tus_endpoint' => $result['tus_endpoint'],
                     'video_uid' => $result['uid'] ?? null,
                     'upload_type' => 'tus',
+                    'file_size' => $fileSize,
+                    'warning' => 'Only call this endpoint once per upload. Reuse the tus_endpoint for all chunks.',
                     'instructions' => [
-                        'method' => 'POST',
-                        'url' => $result['tus_endpoint'],
-                        'headers' => [
-                            'Tus-Resumable: 1.0.0',
-                            'Upload-Length: ' . $fileSize,
-                            'Upload-Offset: 0',
+                        'resumability' => [
+                            'step_1' => 'Before starting/resuming upload, send HEAD request to tus_endpoint to get current Upload-Offset',
+                            'step_2' => 'Use the returned Upload-Offset value for subsequent PATCH requests',
+                            'step_3' => 'If upload fails, check offset again and resume from that point',
                         ],
-                        'note' => 'Use TUS protocol for resumable uploads. Upload file in chunks using PATCH requests.',
+                        'upload_chunks' => [
+                            'method' => 'PATCH',
+                            'url' => $result['tus_endpoint'],
+                            'headers' => [
+                                'Authorization: Bearer {your_token}',
+                                'Tus-Resumable: 1.0.0',
+                                'Upload-Offset: {current_offset}',
+                                'Content-Type: application/offset+octet-stream',
+                            ],
+                            'chunk_size' => 'Recommended: 10-20MB chunks for better reliability',
+                            'note' => 'Always check Upload-Offset before each chunk to ensure resumability',
+                        ],
+                        'check_progress' => [
+                            'method' => 'HEAD',
+                            'url' => $result['tus_endpoint'],
+                            'headers' => [
+                                'Authorization: Bearer {your_token}',
+                                'Tus-Resumable: 1.0.0',
+                            ],
+                            'response' => 'Returns Upload-Offset and Upload-Length headers',
+                        ],
                     ],
                 ], 201);
             }
 
             return response()->json([
                 'message' => 'Failed to create TUS upload endpoint',
+                'error' => 'Check logs for detailed error information. This may be due to rate limiting or API issues.',
+                'suggestion' => 'Wait a few seconds and retry, or check if you are creating duplicate endpoints.',
             ], 500);
         }
 
@@ -433,6 +532,36 @@ class CloudflareController extends Controller
             'thumbnail' => $this->cloudflare->getThumbnailUrl($videoUid),
             'embed_url' => $this->cloudflare->getEmbedUrl($videoUid),
         ]);
+    }
+
+    /**
+     * Check TUS upload progress/offset (Admin only).
+     * Use this to check current upload offset and resume from the correct position.
+     */
+    public function checkTusUploadProgress(Request $request)
+    {
+        $validated = $request->validate([
+            'tus_endpoint' => 'required|url',
+        ]);
+
+        $result = $this->cloudflare->checkTusUploadOffset($validated['tus_endpoint']);
+
+        if ($result) {
+            return response()->json([
+                'message' => 'TUS upload progress retrieved',
+                'upload_offset' => $result['upload_offset'],
+                'upload_length' => $result['upload_length'],
+                'progress_percent' => $result['progress_percent'],
+                'instructions' => [
+                    'note' => 'Use the upload_offset value as the Upload-Offset header in your next PATCH request',
+                    'resume_from' => $result['upload_offset'],
+                ],
+            ]);
+        }
+
+        return response()->json([
+            'message' => 'Failed to check TUS upload progress',
+        ], 500);
     }
 
     /**

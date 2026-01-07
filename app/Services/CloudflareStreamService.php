@@ -534,15 +534,120 @@ class CloudflareStreamService
                 ];
             }
 
-            Log::error('Failed to create TUS upload endpoint', [
+            // Handle specific error cases
+            $errorDetails = [
                 'status' => $httpCode,
                 'headers' => $responseHeaders,
                 'body' => $response,
-            ]);
+                'file_size' => $fileSize,
+            ];
+
+            // Parse error response if available
+            if ($response) {
+                $errorData = json_decode($response, true);
+                if ($errorData && isset($errorData['errors'])) {
+                    $errorDetails['cloudflare_errors'] = $errorData['errors'];
+                }
+            }
+
+            // Check for common error scenarios
+            if ($httpCode === 400) {
+                Log::error('TUS endpoint creation failed: Bad Request', $errorDetails);
+            } elseif ($httpCode === 401) {
+                Log::error('TUS endpoint creation failed: Unauthorized - Check API token', $errorDetails);
+            } elseif ($httpCode === 403) {
+                Log::error('TUS endpoint creation failed: Forbidden - Check account permissions', $errorDetails);
+            } elseif ($httpCode === 429) {
+                Log::error('TUS endpoint creation failed: Rate Limited - Too many requests', $errorDetails);
+            } elseif ($httpCode === 409) {
+                Log::error('TUS endpoint creation failed: Conflict - Endpoint may already exist', $errorDetails);
+            } else {
+                Log::error('Failed to create TUS upload endpoint', $errorDetails);
+            }
 
             return null;
         } catch (\Exception $e) {
             Log::error('Create TUS upload endpoint exception', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Check the current upload offset for a TUS upload (for resumability)
+     *
+     * @param string $tusEndpoint The TUS upload endpoint URL
+     * @return array|null Returns array with 'upload_offset' and 'upload_length', or null on error
+     */
+    public function checkTusUploadOffset(string $tusEndpoint)
+    {
+        if (!$this->isConfigured()) {
+            return [
+                'upload_offset' => 0,
+                'upload_length' => 0,
+            ];
+        }
+
+        try {
+            // Use HEAD request to check current upload status
+            $ch = curl_init();
+            $responseHeaders = [];
+
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $tusEndpoint,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CUSTOMREQUEST => 'HEAD',
+                CURLOPT_HTTPHEADER => [
+                    'Authorization: Bearer ' . $this->apiToken,
+                    'Tus-Resumable: 1.0.0',
+                ],
+                CURLOPT_HEADERFUNCTION => function($curl, $header) use (&$responseHeaders) {
+                    $len = strlen($header);
+                    $header = explode(':', $header, 2);
+                    if (count($header) < 2) return $len;
+                    $responseHeaders[strtolower(trim($header[0]))] = trim($header[1]);
+                    return $len;
+                },
+            ]);
+
+            curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+
+            if ($error) {
+                Log::error('TUS offset check cURL error', ['error' => $error]);
+                return null;
+            }
+
+            if ($httpCode === 200 || $httpCode === 204) {
+                $uploadOffset = isset($responseHeaders['upload-offset']) ? (int)$responseHeaders['upload-offset'] : 0;
+                $uploadLength = isset($responseHeaders['upload-length']) ? (int)$responseHeaders['upload-length'] : 0;
+
+                Log::info('TUS upload offset checked', [
+                    'tus_endpoint' => $tusEndpoint,
+                    'upload_offset' => $uploadOffset,
+                    'upload_length' => $uploadLength,
+                    'progress' => $uploadLength > 0 ? round(($uploadOffset / $uploadLength) * 100, 2) . '%' : '0%',
+                ]);
+
+                return [
+                    'upload_offset' => $uploadOffset,
+                    'upload_length' => $uploadLength,
+                    'progress_percent' => $uploadLength > 0 ? round(($uploadOffset / $uploadLength) * 100, 2) : 0,
+                ];
+            }
+
+            Log::error('Failed to check TUS upload offset', [
+                'status' => $httpCode,
+                'headers' => $responseHeaders,
+            ]);
+
+            return null;
+        } catch (\Exception $e) {
+            Log::error('Check TUS upload offset exception', [
                 'message' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);

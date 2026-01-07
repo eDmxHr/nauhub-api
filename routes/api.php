@@ -228,6 +228,7 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
   Route::prefix('cloudflare')->group(function () {
     Route::get('/test-connection', [CloudflareController::class, 'testConnection']); // Test Cloudflare API connection
     Route::post('/create-direct-upload-url', [CloudflareController::class, 'createDirectUploadUrl']); // Generate direct upload URL (bypasses PHP)
+    Route::post('/check-tus-upload-progress', [CloudflareController::class, 'checkTusUploadProgress']); // Check TUS upload offset/progress
     Route::post('/upload-video', [CloudflareController::class, 'uploadVideo']); // Upload video file through PHP (40MB limit)
     Route::post('/upload-from-url', [CloudflareController::class, 'uploadFromUrl']); // Upload from any direct URL
     Route::post('/upload-from-magnet', [CloudflareController::class, 'uploadFromMagnet']); // Step 1: Add magnet to Put.io (returns immediately)
