@@ -160,6 +160,15 @@ class SystemConfigSeeder extends Seeder
                 'is_editable' => true,
             ],
             [
+                'key' => 'security.block_duration_minutes',
+                'value' => '30',
+                'type' => 'integer',
+                'description' => 'Duration in minutes to block IP after max failed login attempts',
+                'group' => 'security',
+                'is_public' => false,
+                'is_editable' => true,
+            ],
+            [
                 'key' => 'security.session_lifetime_hours',
                 'value' => '24',
                 'type' => 'integer',

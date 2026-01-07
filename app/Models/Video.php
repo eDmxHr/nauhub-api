@@ -18,6 +18,7 @@ class Video extends Model
         'cloudflare_video_uid',
         'status',
         'duration',
+        'quality',         // e.g., "1080p", "720p", "4K", "HD", "SD"
         'release_year',
         'age_rating',      // e.g., "PG-13", "R", "TV-MA"
         'imdb_rating',     // e.g., 8.5, 7.2

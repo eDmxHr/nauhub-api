@@ -239,12 +239,7 @@ class VideoController extends Controller
             }
         }
 
-        // For movies without magnet URL, cloudflare_video_uid should be provided
-        if ($validated['type'] === 'movie' && empty($validated['cloudflare_video_uid'])) {
-            return response()->json([
-                'message' => 'Either cloudflare_video_uid or magnet_url is required for movies',
-            ], 400);
-        }
+        // Note: cloudflare_video_uid can be added later via update or file upload endpoints
 
         $video = Video::create($validated);
 
