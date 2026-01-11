@@ -185,6 +185,20 @@ class SubscriptionController extends Controller
             'auto_renew' => false,
         ]);
 
+        // Check if user has any other active subscriptions
+        $hasOtherActiveSubscription = Subscription::where('user_id', $userId)
+            ->where('status', 'active')
+            ->where('end_date', '>=', now())
+            ->where('id', '!=', $subscription->id)
+            ->exists();
+
+        // Update user's is_subscribed status only if no other active subscriptions
+        if (!$hasOtherActiveSubscription) {
+            $request->user()->update([
+                'is_subscribed' => false,
+            ]);
+        }
+
         return response()->json([
             'message' => 'Subscription cancelled successfully',
             'subscription' => $subscription,
@@ -244,6 +258,11 @@ class SubscriptionController extends Controller
         if ($payment->subscription) {
             $payment->subscription->update([
                 'status' => 'active',
+            ]);
+
+            // Update user's is_subscribed status
+            $payment->user->update([
+                'is_subscribed' => true,
             ]);
         }
 
@@ -305,6 +324,20 @@ class SubscriptionController extends Controller
             $payment->subscription->update([
                 'status' => 'cancelled',
             ]);
+
+            // Check if user has any other active subscriptions
+            $hasOtherActiveSubscription = Subscription::where('user_id', $payment->user_id)
+                ->where('status', 'active')
+                ->where('end_date', '>=', now())
+                ->where('id', '!=', $payment->subscription_id)
+                ->exists();
+
+            // Update user's is_subscribed status only if no other active subscriptions
+            if (!$hasOtherActiveSubscription) {
+                $payment->user->update([
+                    'is_subscribed' => false,
+                ]);
+            }
         }
 
         // Log payment rejection

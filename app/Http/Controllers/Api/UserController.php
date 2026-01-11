@@ -70,7 +70,44 @@ class UserController extends Controller
                 break;
         }
 
-        $users = $query->paginate($perPage);
+        $users = $query->with([
+            'profiles:id,user_id,name,avatar',
+            'subscriptions' => function ($q) {
+                $q->where('status', 'active')
+                  ->where('end_date', '>=', now())
+                  ->orderBy('end_date', 'desc')
+                  ->limit(1);
+            }
+        ])->paginate($perPage);
+
+        // Add current subscription plan info to each user
+        $users->getCollection()->transform(function ($user) {
+            $userData = $user->toArray();
+
+            // Get current subscription
+            $currentSubscription = $user->subscriptions->first();
+
+            if ($currentSubscription) {
+                $subscriptionPlan = \App\Models\SubscriptionPlan::where('duration', $currentSubscription->plan_type)
+                    ->where('is_active', true)
+                    ->first();
+
+                $userData['current_subscription'] = [
+                    'id' => $currentSubscription->id,
+                    'plan_type' => $currentSubscription->plan_type,
+                    'end_date' => $currentSubscription->end_date->format('Y-m-d'),
+                    'days_remaining' => now()->diffInDays($currentSubscription->end_date),
+                    'plan_name' => $subscriptionPlan ? $subscriptionPlan->name : ucfirst($currentSubscription->plan_type),
+                ];
+            } else {
+                $userData['current_subscription'] = null;
+            }
+
+            // Remove the subscriptions array to keep response clean
+            unset($userData['subscriptions']);
+
+            return $userData;
+        });
 
         return response()->json($users);
     }
@@ -103,12 +140,18 @@ class UserController extends Controller
     {
         $user = User::with([
             'subscriptions' => function ($query) {
-                $query->orderBy('created_at', 'desc');
+                $query->orderBy('created_at', 'desc')->limit(10);
             },
             'payments' => function ($query) {
-                $query->orderBy('created_at', 'desc');
+                $query->with('subscription')->orderBy('created_at', 'desc')->limit(10);
             },
             'profiles',
+            'watchHistory' => function ($query) {
+                $query->with(['video', 'episode'])->latest()->limit(5);
+            },
+            'playlists' => function ($query) {
+                $query->withCount('videos')->latest()->limit(5);
+            },
         ])->find($id);
 
         if (!$user) {
@@ -117,14 +160,66 @@ class UserController extends Controller
             ], 404);
         }
 
-        // Add additional stats
+        // Get current active subscription with plan details
+        $currentSubscription = $user->subscriptions()
+            ->where('status', 'active')
+            ->where('end_date', '>=', now())
+            ->orderBy('end_date', 'desc')
+            ->first();
+
+        // If user has active subscription, get the plan details
+        $subscriptionPlan = null;
+        if ($currentSubscription) {
+            $subscriptionPlan = \App\Models\SubscriptionPlan::where('duration', $currentSubscription->plan_type)
+                ->where('is_active', true)
+                ->first();
+        }
+
+        // Build response data
         $userData = $user->toArray();
+
+        // Add current subscription with plan details
+        $userData['current_subscription'] = $currentSubscription ? [
+            'id' => $currentSubscription->id,
+            'plan_type' => $currentSubscription->plan_type,
+            'amount' => (float) $currentSubscription->amount,
+            'currency' => $currentSubscription->currency,
+            'start_date' => $currentSubscription->start_date->format('Y-m-d'),
+            'end_date' => $currentSubscription->end_date->format('Y-m-d'),
+            'status' => $currentSubscription->status,
+            'days_remaining' => now()->diffInDays($currentSubscription->end_date),
+            'auto_renew' => $currentSubscription->auto_renew,
+            'plan_details' => $subscriptionPlan ? [
+                'plan_id' => $subscriptionPlan->plan_id,
+                'tier' => $subscriptionPlan->tier,
+                'name' => $subscriptionPlan->name,
+                'duration' => $subscriptionPlan->duration,
+                'price' => (float) $subscriptionPlan->price,
+                'features' => $subscriptionPlan->features,
+            ] : null,
+        ] : null;
+
+        // Add comprehensive stats
         $userData['stats'] = [
-            'watch_history_count' => $user->watchHistory()->count(),
-            'playlist_count' => $user->playlists()->count(),
-            'profile_count' => $user->profiles()->count(),
+            'total_subscriptions' => $user->subscriptions()->count(),
+            'active_subscriptions' => $user->subscriptions()->where('status', 'active')->where('end_date', '>=', now())->count(),
+            'expired_subscriptions' => $user->subscriptions()->where('status', 'expired')->count(),
+            'cancelled_subscriptions' => $user->subscriptions()->where('status', 'cancelled')->count(),
             'total_payments' => $user->payments()->count(),
             'approved_payments' => $user->payments()->where('status', 'approved')->count(),
+            'pending_payments' => $user->payments()->where('status', 'pending')->count(),
+            'rejected_payments' => $user->payments()->where('status', 'rejected')->count(),
+            'total_spent' => (float) $user->payments()->where('status', 'approved')->sum('amount'),
+            'profile_count' => $user->profiles()->count(),
+            'watch_history_count' => $user->watchHistory()->count(),
+            'playlist_count' => $user->playlists()->count(),
+        ];
+
+        // Add account info
+        $userData['account_info'] = [
+            'member_since' => $user->created_at->format('Y-m-d H:i:s'),
+            'member_for_days' => now()->diffInDays($user->created_at),
+            'last_updated' => $user->updated_at->format('Y-m-d H:i:s'),
         ];
 
         return response()->json($userData);
