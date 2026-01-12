@@ -20,6 +20,8 @@ use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminNotificationController;
 use App\Http\Controllers\Api\SystemConfigController;
 use App\Http\Controllers\Api\IpBlockController;
+use App\Http\Controllers\Api\SupportTicketController;
+use App\Http\Controllers\Api\Admin\AdminSupportTicketController;
 
 /*
 |--------------------------------------------------------------------------
@@ -149,14 +151,29 @@ Route::middleware('auth:sanctum')->group(function () {
   // Subscription routes (authenticated user only)
   Route::prefix('subscriptions')->group(function () {
     Route::get('/status', [SubscriptionController::class, 'status']); // Get current user subscription status
-    Route::post('/subscribe', [SubscriptionController::class, 'subscribe']); // Subscribe with payment proof
+    Route::post('/subscribe', [SubscriptionController::class, 'subscribe']); // Subscribe with payment proof (first time)
+    Route::post('/renew', [SubscriptionController::class, 'renew']); // Renew/extend existing subscription
+    Route::post('/upgrade', [SubscriptionController::class, 'upgrade']); // Upgrade to different plan
     Route::get('/history', [SubscriptionController::class, 'history']); // Get subscription history
+    Route::get('/payments', [SubscriptionController::class, 'payments']); // Get payment history
+    Route::post('/request-refund', [SubscriptionController::class, 'requestRefund']); // Request refund (creates support ticket)
     Route::post('/cancel', [SubscriptionController::class, 'cancel']); // Cancel active subscription
   });
 
   // Cloudflare Stream routes (user)
   Route::prefix('stream')->group(function () {
     Route::get('/{videoUid}', [CloudflareController::class, 'getStreamUrl']); // Get streaming URLs for a video
+  });
+
+  // Support Ticket routes (authenticated user)
+  Route::prefix('support')->group(function () {
+    Route::get('/categories', [SupportTicketController::class, 'categories']); // Get ticket categories
+    Route::get('/tickets', [SupportTicketController::class, 'index']); // List user's tickets
+    Route::post('/tickets', [SupportTicketController::class, 'store']); // Create new ticket
+    Route::get('/tickets/{ticketNumber}', [SupportTicketController::class, 'show']); // Get ticket details
+    Route::post('/tickets/{ticketNumber}/reply', [SupportTicketController::class, 'reply']); // Reply to ticket
+    Route::post('/tickets/{ticketNumber}/close', [SupportTicketController::class, 'close']); // Close ticket
+    Route::post('/tickets/{ticketNumber}/reopen', [SupportTicketController::class, 'reopen']); // Reopen ticket
   });
 });
 
@@ -214,14 +231,19 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
 
   // Admin: Subscription & Payment management
   Route::prefix('subscriptions')->group(function () {
+    Route::get('/stats', [SubscriptionController::class, 'stats']); // Get subscription & payment statistics
     Route::get('/all', [SubscriptionController::class, 'allSubscriptions']); // Get all subscriptions (with status filter)
+    Route::get('/{id}', [SubscriptionController::class, 'showSubscription']); // Get single subscription details
+    Route::post('/{id}/extend', [SubscriptionController::class, 'extendSubscription']); // Extend/renew subscription
   });
 
   Route::prefix('payments')->group(function () {
     Route::get('/pending', [SubscriptionController::class, 'pendingPayments']); // Get pending payments
     Route::get('/all', [SubscriptionController::class, 'allPayments']); // Get all payments (with status filter)
+    Route::get('/{id}', [SubscriptionController::class, 'showPayment']); // Get single payment details
     Route::post('/{id}/approve', [SubscriptionController::class, 'approvePayment']); // Approve payment
     Route::post('/{id}/reject', [SubscriptionController::class, 'rejectPayment']); // Reject payment
+    Route::post('/{id}/refund', [SubscriptionController::class, 'refundPayment']); // Refund payment
   });
 
   // Admin: Cloudflare Stream & Put.io management
@@ -309,5 +331,19 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::post('/bulk-unblock', [IpBlockController::class, 'bulkUnblock']); // Bulk unblock IPs
     Route::post('/cleanup', [IpBlockController::class, 'cleanup']); // Clean up expired blocks
     Route::post('/{id}/reset-attempts', [IpBlockController::class, 'resetAttempts']); // Reset failed login attempts
+  });
+
+  // Admin: Support Tickets
+  Route::prefix('support')->group(function () {
+    Route::get('/stats', [AdminSupportTicketController::class, 'stats']); // Get ticket statistics
+    Route::get('/tickets', [AdminSupportTicketController::class, 'index']); // List all tickets with filters
+    Route::get('/tickets/{ticketNumber}', [AdminSupportTicketController::class, 'show']); // Get ticket details
+    Route::post('/tickets/{ticketNumber}/assign', [AdminSupportTicketController::class, 'assign']); // Assign ticket
+    Route::put('/tickets/{ticketNumber}/status', [AdminSupportTicketController::class, 'updateStatus']); // Update status
+    Route::put('/tickets/{ticketNumber}/priority', [AdminSupportTicketController::class, 'updatePriority']); // Update priority
+    Route::post('/tickets/{ticketNumber}/reply', [AdminSupportTicketController::class, 'reply']); // Reply to ticket
+    Route::post('/tickets/{ticketNumber}/resolve', [AdminSupportTicketController::class, 'resolve']); // Resolve ticket
+    Route::post('/tickets/{ticketNumber}/close', [AdminSupportTicketController::class, 'close']); // Close ticket
+    Route::post('/tickets/bulk-update', [AdminSupportTicketController::class, 'bulkUpdate']); // Bulk update tickets
   });
 });
