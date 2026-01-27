@@ -2,6 +2,8 @@
 
 namespace Database\Seeders;
 
+use App\Models\User;
+use App\Models\Subscription;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -13,8 +15,62 @@ class TestPaymentSeeder extends Seeder
    */
   public function run(): void
   {
-    // Admin user ID
-    $adminId = 6;
+    // Create or get admin user
+    $admin = User::firstOrCreate(
+      ['id' => 6],
+      [
+        'name' => 'Admin User',
+        'phone' => '+9607770006',
+        'role' => 'admin',
+        'is_active' => true,
+      ]
+    );
+    $adminId = $admin->id;
+
+    // Get subscriptions created by TestPaymentSubscriptionSeeder
+    $subscription1 = Subscription::where('user_id', 7)->where('plan_type', 'monthly')->first();
+    $subscription2 = Subscription::where('user_id', 7)->where('plan_type', 'annual')->first();
+    $subscription3 = Subscription::where('user_id', 8)->where('plan_type', 'annual')->first();
+    
+    // If subscriptions don't exist, create them
+    if (!$subscription1) {
+      $subscription1 = Subscription::create([
+        'user_id' => 7,
+        'plan_type' => 'monthly',
+        'amount' => 9.99,
+        'currency' => 'MVR',
+        'start_date' => '2025-01-01',
+        'end_date' => '2025-01-31',
+        'status' => 'active',
+        'auto_renew' => true,
+      ]);
+    }
+    
+    if (!$subscription2) {
+      $subscription2 = Subscription::create([
+        'user_id' => 7,
+        'plan_type' => 'annual',
+        'amount' => 19.99,
+        'currency' => 'MVR',
+        'start_date' => '2024-12-01',
+        'end_date' => '2024-12-31',
+        'status' => 'active',
+        'auto_renew' => false,
+      ]);
+    }
+    
+    if (!$subscription3) {
+      $subscription3 = Subscription::create([
+        'user_id' => 8,
+        'plan_type' => 'annual',
+        'amount' => 49.99,
+        'currency' => 'MVR',
+        'start_date' => '2024-11-01',
+        'end_date' => '2024-12-31',
+        'status' => 'expired',
+        'auto_renew' => false,
+      ]);
+    }
 
     DB::table('payments')->insert([
       [

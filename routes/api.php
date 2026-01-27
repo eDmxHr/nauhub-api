@@ -235,7 +235,6 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::get('/transfer/{transferId}/status', [CloudflareController::class, 'checkTransferStatus']); // Step 2: Check Put.io download status
     Route::post('/complete-upload/{transferId}', [CloudflareController::class, 'completeUpload']); // Step 3: Upload to Cloudflare when Put.io is done
     Route::get('/video/{videoUid}', [CloudflareController::class, 'getVideo']); // Get video details
-    Route::get('/video/{videoUid}/status', [CloudflareController::class, 'getUploadStatus']); // Get upload status
     Route::delete('/video/{videoUid}', [CloudflareController::class, 'deleteVideo']); // Delete video
   });
 

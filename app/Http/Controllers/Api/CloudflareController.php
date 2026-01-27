@@ -66,6 +66,7 @@ class CloudflareController extends Controller
             'file_size' => 'nullable|integer|min:0', // File size in bytes
             'video_uid' => 'nullable|string', // Optional: existing video UID to reuse
             'idempotency_key' => 'nullable|string|max:255', // Optional: idempotency key to prevent duplicate endpoints
+            'title' => 'nullable|string|max:255', // Video title/name to appear in Cloudflare
         ]);
 
         // Only use maxDurationSeconds if explicitly provided - don't default to 6 hours
@@ -147,7 +148,8 @@ class CloudflareController extends Controller
             ]);
 
             // Use TUS resumable upload for large files
-            $result = $this->cloudflare->createTusUploadEndpoint($fileSize, $maxDuration);
+            $title = $validated['title'] ?? null;
+            $result = $this->cloudflare->createTusUploadEndpoint($fileSize, $maxDuration, $title);
             
             // Cache the result for 5 minutes to prevent duplicate creation
             if ($result) {
@@ -205,7 +207,8 @@ class CloudflareController extends Controller
         }
 
         // Use regular direct upload for smaller files
-        $result = $this->cloudflare->createDirectUploadUrl($maxDuration);
+        $title = $validated['title'] ?? null;
+        $result = $this->cloudflare->createDirectUploadUrl($maxDuration, $title);
 
         if ($result) {
             return response()->json([
@@ -433,7 +436,7 @@ class CloudflareController extends Controller
                     'thumbnail' => $this->cloudflare->getThumbnailUrl($cloudflareResult['uid']),
                     'embed_url' => $this->cloudflare->getEmbedUrl($cloudflareResult['uid']),
                 ],
-                'note' => 'Cloudflare is now processing the video. Check status at /api/admin/cloudflare/video/{uid}/status',
+                'note' => 'Cloudflare is now processing the video.',
             ], 202);
         }
 

@@ -404,10 +404,11 @@ class CloudflareStreamService
     /**
      * Create a direct upload URL for one-time upload
      *
-     * @param int $maxDurationSeconds Maximum duration in seconds (default: 6 hours)
+     * @param int|null $maxDurationSeconds Maximum duration in seconds (optional)
+     * @param string|null $videoName Video name/title to appear in Cloudflare (optional)
      * @return array|null
      */
-    public function createDirectUploadUrl(int $maxDurationSeconds = 21600)
+    public function createDirectUploadUrl(?int $maxDurationSeconds = null, ?string $videoName = null)
     {
         if (!$this->isConfigured()) {
             return [
@@ -417,10 +418,16 @@ class CloudflareStreamService
         }
 
         try {
+            $payload = [];
+            if ($maxDurationSeconds !== null) {
+                $payload['maxDurationSeconds'] = $maxDurationSeconds;
+            }
+            if ($videoName !== null && !empty($videoName)) {
+                $payload['meta'] = ['name' => $videoName];
+            }
+
             $response = Http::withToken($this->apiToken)
-                ->post("{$this->baseUrl}/direct_upload", [
-                    'maxDurationSeconds' => $maxDurationSeconds,
-                ]);
+                ->post("{$this->baseUrl}/direct_upload", $payload);
 
             if ($response->successful()) {
                 $data = $response->json();
@@ -446,9 +453,10 @@ class CloudflareStreamService
      *
      * @param int $fileSize File size in bytes
      * @param int|null $maxDurationSeconds Maximum duration in seconds (optional - only set if known)
+     * @param string|null $videoName Video name/title to appear in Cloudflare (optional)
      * @return array|null Returns array with 'tus_endpoint' (Location header) and optionally 'uid'
      */
-    public function createTusUploadEndpoint(int $fileSize, ?int $maxDurationSeconds = null)
+    public function createTusUploadEndpoint(int $fileSize, ?int $maxDurationSeconds = null, ?string $videoName = null)
     {
         if (!$this->isConfigured()) {
             return [
@@ -467,8 +475,11 @@ class CloudflareStreamService
 
             // Prepare TUS Upload-Metadata header (base64 encoded)
             // Format: key base64value,key2 base64value2
-            // Only include maxDurationSeconds in metadata if provided
+            // Include video name and maxDurationSeconds if provided
             $uploadMetadata = [];
+            if ($videoName !== null && !empty($videoName)) {
+                $uploadMetadata[] = 'name ' . base64_encode($videoName);
+            }
             if ($maxDurationSeconds !== null) {
                 $uploadMetadata[] = 'maxDurationSeconds ' . base64_encode((string)$maxDurationSeconds);
             }

@@ -13,26 +13,36 @@ class AdminUserSeeder extends Seeder
      */
     public function run(): void
     {
-        // Create admin user
-        User::create([
-            'name' => 'Admin User',
-            'phone' => '9999999',
-            'phone_verified' => true,
-            'role' => 'admin',
-            'is_subscribed' => true,
-        ]);
+        // Create admin user (or update if exists)
+        $admin = User::updateOrCreate(
+            ['phone' => '9999999'],
+            [
+                'name' => 'Admin User',
+                'email' => 'admin@nauhub.com',
+                'phone_verified' => true,
+                'role' => 'admin',
+                'is_subscribed' => true,
+                'is_active' => true,
+                'password' => Hash::make('password'), // Default password for admin
+            ]
+        );
 
-        // Create regular test user
-        User::create([
-            'name' => 'Test User',
-            'phone' => '1234567',
-            'phone_verified' => true,
-            'role' => 'user',
-            'is_subscribed' => true,
-        ]);
+        // Create regular test user (or update if exists)
+        $user = User::updateOrCreate(
+            ['phone' => '1234567'],
+            [
+                'name' => 'Test User',
+                'email' => 'user@nauhub.com',
+                'phone_verified' => true,
+                'role' => 'user',
+                'is_subscribed' => false,
+                'is_active' => true,
+                'password' => Hash::make('password'), // Default password for user
+            ]
+        );
 
-        $this->command->info('Admin and test users created successfully!');
-        $this->command->info('Admin phone: 9999999 | OTP: 123456');
-        $this->command->info('User phone: 1234567 | OTP: 123456');
+        $this->command->info('✅ Admin and test users created successfully!');
+        $this->command->info('📱 Admin - Phone: 9999999 | Email: admin@nauhub.com | Password: password');
+        $this->command->info('📱 User - Phone: 1234567 | Email: user@nauhub.com | Password: password');
     }
 }
