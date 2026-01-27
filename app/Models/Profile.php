@@ -25,6 +25,16 @@ class Profile extends Model
         'is_kids_profile' => 'boolean',
     ];
 
+    protected $appends = [
+        'has_pin', // Add has_pin to JSON responses
+    ];
+
+    // Check if profile has a PIN set
+    public function getHasPinAttribute(): bool
+    {
+        return !empty($this->pin);
+    }
+
     // Profile belongs to a user
     public function user()
     {

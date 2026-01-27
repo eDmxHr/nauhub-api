@@ -112,4 +112,14 @@ class User extends Authenticatable
     {
         return $this->is_subscribed;
     }
+
+    // Get current active subscription
+    public function currentSubscription()
+    {
+        return $this->subscriptions()
+            ->where('status', 'active')
+            ->where('end_date', '>=', now())
+            ->orderBy('end_date', 'desc')
+            ->first();
+    }
 }
