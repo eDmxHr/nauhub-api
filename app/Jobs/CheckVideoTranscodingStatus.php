@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Video;
 use App\Models\Episode;
+use App\Models\UploadJob;
 use App\Services\CloudflareStreamService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -111,6 +112,52 @@ class CheckVideoTranscodingStatus implements ShouldQueue
                 'model' => $this->modelType,
                 'model_id' => $this->modelId,
                 'status' => $status,
+            ]);
+
+            // Also update the upload job status
+            $this->updateUploadJobStatus($status);
+        }
+    }
+
+    /**
+     * Update the upload job status based on transcoding result
+     */
+    protected function updateUploadJobStatus(string $status): void
+    {
+        // Find upload job by cloudflare UID
+        $uploadJob = UploadJob::where('cloudflare_uid', $this->cloudflareUid)->first();
+
+        if (!$uploadJob) {
+            // Try finding by model type and ID
+            $uploadJob = UploadJob::where('model_type', $this->modelType)
+                ->where('model_id', $this->modelId)
+                ->whereIn('status', [
+                    UploadJob::STATUS_PROCESSING,
+                    UploadJob::STATUS_UPLOADING,
+                ])
+                ->first();
+        }
+
+        if (!$uploadJob) {
+            Log::debug('No upload job found to update', [
+                'cloudflare_uid' => $this->cloudflareUid,
+                'model_type' => $this->modelType,
+                'model_id' => $this->modelId,
+            ]);
+            return;
+        }
+
+        if ($status === 'ready') {
+            $uploadJob->markAsCompleted();
+            Log::info('Upload job marked as completed', [
+                'upload_job_id' => $uploadJob->id,
+                'cloudflare_uid' => $this->cloudflareUid,
+            ]);
+        } elseif ($status === 'error') {
+            $uploadJob->markAsFailed('Cloudflare transcoding failed or timed out');
+            Log::info('Upload job marked as failed', [
+                'upload_job_id' => $uploadJob->id,
+                'cloudflare_uid' => $this->cloudflareUid,
             ]);
         }
     }

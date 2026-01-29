@@ -81,9 +81,10 @@ class CloudflareStreamService
      * @param string $filePath - Path to the video file
      * @param string $fileName - Original filename
      * @param array $metadata - Video metadata
+     * @param \App\Models\UploadJob|null $uploadJob - Optional upload job for progress tracking
      * @return array|null
      */
-    public function uploadFromFile(string $filePath, string $fileName, array $metadata = [])
+    public function uploadFromFile(string $filePath, string $fileName, array $metadata = [], ?\App\Models\UploadJob $uploadJob = null)
     {
         if (!$this->isConfigured()) {
             return $this->getMockResponse();
@@ -98,7 +99,7 @@ class CloudflareStreamService
                     'size' => $fileSize,
                     'file' => $fileName,
                 ]);
-                return $this->uploadUsingTus($filePath, $fileName, $metadata);
+                return $this->uploadUsingTus($filePath, $fileName, $metadata, $uploadJob);
             }
 
             // For smaller files, use direct upload
@@ -140,6 +141,23 @@ class CloudflareStreamService
                 CURLOPT_TIMEOUT => 7200, // 2 hour timeout
             ]);
 
+            // Track upload progress for smaller files
+            if ($uploadJob) {
+                $lastUpdate = 0;
+                curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+                curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($resource, $downloadSize, $downloaded, $uploadSize, $uploaded) use ($uploadJob, &$lastUpdate, $fileSize) {
+                    $total = $uploadSize > 0 ? $uploadSize : $fileSize;
+                    if ($total > 0 && $uploaded > 0) {
+                        $percent = (int)(($uploaded / $total) * 100);
+                        if ($percent >= $lastUpdate + 5 || $percent === 100) {
+                            $uploadJob->updateProgress($percent, (int)$uploaded, (int)$total);
+                            $lastUpdate = $percent;
+                        }
+                    }
+                    return 0;
+                });
+            }
+
             $response = curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $error = curl_error($ch);
@@ -176,9 +194,10 @@ class CloudflareStreamService
      * @param string $filePath
      * @param string $fileName
      * @param array $metadata
+     * @param \App\Models\UploadJob|null $uploadJob
      * @return array|null
      */
-    protected function uploadUsingTus(string $filePath, string $fileName, array $metadata = [])
+    protected function uploadUsingTus(string $filePath, string $fileName, array $metadata = [], ?\App\Models\UploadJob $uploadJob = null)
     {
         try {
             $fileSize = filesize($filePath);
@@ -259,26 +278,46 @@ class CloudflareStreamService
             Log::info('TUS session created', ['uid' => $videoUid, 'upload_url' => $uploadUrl]);
 
             // Step 2: Upload file in chunks using TUS protocol
-            $fp = fopen($filePath, 'rb');
+            // Use 10MB chunks to stay within PHP memory limits (128MB default)
             $offset = 0;
-            $chunkSize = 50 * 1024 * 1024; // 50MB chunks
+            $chunkSize = 10 * 1024 * 1024; // 10MB chunks
 
-            while (!feof($fp)) {
-                $chunk = fread($fp, $chunkSize);
-                $chunkLength = strlen($chunk);
+            while ($offset < $fileSize) {
+                $currentChunkSize = min($chunkSize, $fileSize - $offset);
+
+                // Create a temp file for this chunk to stream it
+                $chunkFile = tempnam(sys_get_temp_dir(), 'tus_chunk_');
+                $sourceHandle = fopen($filePath, 'rb');
+                $chunkHandle = fopen($chunkFile, 'wb');
+
+                fseek($sourceHandle, $offset);
+                $bytesWritten = 0;
+                while ($bytesWritten < $currentChunkSize && !feof($sourceHandle)) {
+                    $readSize = min(8192, $currentChunkSize - $bytesWritten); // Read in 8KB buffers
+                    $data = fread($sourceHandle, $readSize);
+                    fwrite($chunkHandle, $data);
+                    $bytesWritten += strlen($data);
+                }
+                fclose($sourceHandle);
+                fclose($chunkHandle);
+
+                // Upload chunk using file streaming
+                $chunkHandle = fopen($chunkFile, 'rb');
 
                 $ch = curl_init();
                 curl_setopt_array($ch, [
                     CURLOPT_URL => $uploadUrl,
                     CURLOPT_RETURNTRANSFER => true,
                     CURLOPT_CUSTOMREQUEST => 'PATCH',
-                    CURLOPT_POSTFIELDS => $chunk,
+                    CURLOPT_UPLOAD => true,
+                    CURLOPT_INFILE => $chunkHandle,
+                    CURLOPT_INFILESIZE => $currentChunkSize,
                     CURLOPT_HTTPHEADER => [
                         'Authorization: Bearer ' . $this->apiToken,
                         'Tus-Resumable: 1.0.0',
                         'Upload-Offset: ' . $offset,
                         'Content-Type: application/offset+octet-stream',
-                        'Content-Length: ' . $chunkLength,
+                        'Content-Length: ' . $currentChunkSize,
                     ],
                     CURLOPT_TIMEOUT => 3600,
                 ]);
@@ -286,6 +325,8 @@ class CloudflareStreamService
                 $response = curl_exec($ch);
                 $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
                 curl_close($ch);
+                fclose($chunkHandle);
+                unlink($chunkFile);
 
                 if ($httpCode !== 204) {
                     Log::error('TUS chunk upload failed', [
@@ -293,19 +334,23 @@ class CloudflareStreamService
                         'offset' => $offset,
                         'body' => $response,
                     ]);
-                    fclose($fp);
                     return null;
                 }
 
-                $offset += $chunkLength;
+                $offset += $currentChunkSize;
+                $percent = (int)(($offset / $fileSize) * 100);
+
+                // Update upload job progress
+                if ($uploadJob) {
+                    $uploadJob->updateProgress($percent, $offset, $fileSize);
+                }
+
                 Log::info('TUS chunk uploaded', [
                     'offset' => $offset,
                     'total' => $fileSize,
-                    'progress' => round(($offset / $fileSize) * 100, 2) . '%',
+                    'progress' => $percent . '%',
                 ]);
             }
-
-            fclose($fp);
 
             Log::info('TUS upload completed', ['uid' => $videoUid]);
 
@@ -621,6 +666,8 @@ class CloudflareStreamService
                 CURLOPT_URL => $tusEndpoint,
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_CUSTOMREQUEST => 'HEAD',
+                CURLOPT_TIMEOUT => 10, // 10 second timeout
+                CURLOPT_CONNECTTIMEOUT => 5, // 5 second connection timeout
                 CURLOPT_HTTPHEADER => [
                     'Authorization: Bearer ' . $this->apiToken,
                     'Tus-Resumable: 1.0.0',
@@ -639,8 +686,42 @@ class CloudflareStreamService
             $error = curl_error($ch);
             curl_close($ch);
 
+            // Even if there's a cURL error, we might have captured the headers
+            // This can happen with "bytes missing" errors where headers were received
             if ($error) {
-                Log::error('TUS offset check cURL error', ['error' => $error]);
+                Log::warning('TUS offset check cURL error (may have partial data)', [
+                    'error' => $error,
+                    'http_code' => $httpCode,
+                    'headers_received' => !empty($responseHeaders),
+                    'headers' => $responseHeaders, // Log actual headers for debugging
+                ]);
+
+                // If we got the upload headers despite the error, use them
+                if (isset($responseHeaders['upload-offset']) && isset($responseHeaders['upload-length'])) {
+                    $uploadOffset = (int)$responseHeaders['upload-offset'];
+                    $uploadLength = (int)$responseHeaders['upload-length'];
+
+                    Log::info('TUS offset recovered from partial response', [
+                        'upload_offset' => $uploadOffset,
+                        'upload_length' => $uploadLength,
+                    ]);
+
+                    return [
+                        'upload_offset' => $uploadOffset,
+                        'upload_length' => $uploadLength,
+                        'progress_percent' => $uploadLength > 0 ? round(($uploadOffset / $uploadLength) * 100, 2) : 0,
+                    ];
+                }
+
+                return null;
+            }
+
+            // Handle non-success HTTP codes from Cloudflare
+            if ($httpCode >= 400) {
+                Log::warning('TUS offset check received error from Cloudflare', [
+                    'http_code' => $httpCode,
+                    'headers' => $responseHeaders,
+                ]);
                 return null;
             }
 

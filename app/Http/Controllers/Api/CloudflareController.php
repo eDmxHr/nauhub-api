@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Jobs\UploadVideoFromPutio;
+use App\Models\UploadJob;
 use App\Services\CloudflareStreamService;
 use App\Services\PutioService;
+use App\Services\UploadJobService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 
@@ -13,11 +15,13 @@ class CloudflareController extends Controller
 {
     protected $cloudflare;
     protected $putio;
+    protected $uploadJobService;
 
-    public function __construct(CloudflareStreamService $cloudflare, PutioService $putio)
+    public function __construct(CloudflareStreamService $cloudflare, PutioService $putio, UploadJobService $uploadJobService)
     {
         $this->cloudflare = $cloudflare;
         $this->putio = $putio;
+        $this->uploadJobService = $uploadJobService;
     }
 
     /**
@@ -67,6 +71,8 @@ class CloudflareController extends Controller
             'video_uid' => 'nullable|string', // Optional: existing video UID to reuse
             'idempotency_key' => 'nullable|string|max:255', // Optional: idempotency key to prevent duplicate endpoints
             'title' => 'nullable|string|max:255', // Video title/name to appear in Cloudflare
+            'model_type' => 'nullable|string|in:video,episode', // Optional: model type for upload job tracking
+            'model_id' => 'nullable|integer', // Optional: model ID for upload job tracking
         ]);
 
         // Only use maxDurationSeconds if explicitly provided - don't default to 6 hours
@@ -74,7 +80,7 @@ class CloudflareController extends Controller
         $useTus = $validated['use_tus'] ?? false;
         $fileSize = $validated['file_size'] ?? 0;
         $existingVideoUid = $validated['video_uid'] ?? null;
-        
+
         // Check if TUS should be used: use_tus is true OR file_size >= 200MB
         $shouldUseTus = $useTus || ($fileSize >= 200 * 1024 * 1024);
 
@@ -85,12 +91,12 @@ class CloudflareController extends Controller
             $providedKey = $validated['idempotency_key'] ?? $request->header('X-Idempotency-Key');
             $userId = $request->user()?->id ?? 'guest';
             $sessionId = $request->header('X-Session-ID') ?? session()->getId();
-            
-            $idempotencyKey = $providedKey 
-                ? md5($providedKey) 
+
+            $idempotencyKey = $providedKey
+                ? md5($providedKey)
                 : md5($fileSize . '_' . ($maxDuration ?? 'none') . '_' . $userId . '_' . $sessionId);
             $cacheKey = 'tus_endpoint_' . $idempotencyKey;
-            
+
             // Check if we recently created an endpoint for this request
             $cachedResult = Cache::get($cacheKey);
             if ($cachedResult) {
@@ -98,7 +104,7 @@ class CloudflareController extends Controller
                     'file_size' => $fileSize,
                     'cache_key' => $cacheKey,
                 ]);
-                
+
                 return response()->json([
                     'message' => 'TUS upload endpoint retrieved from cache (duplicate request prevented)',
                     'tus_endpoint' => $cachedResult['tus_endpoint'],
@@ -150,22 +156,37 @@ class CloudflareController extends Controller
             // Use TUS resumable upload for large files
             $title = $validated['title'] ?? null;
             $result = $this->cloudflare->createTusUploadEndpoint($fileSize, $maxDuration, $title);
-            
+
             // Cache the result for 5 minutes to prevent duplicate creation
             if ($result) {
                 Cache::put($cacheKey, $result, now()->addMinutes(5));
             }
 
             if ($result) {
+                // Create upload job for tracking
+                $uploadJobId = null;
+                $videoUid = $result['uid'] ?? null;
+                if ($videoUid) {
+                    $uploadJob = $this->uploadJobService->createTusUploadJob(
+                        $validated['model_type'] ?? 'video',
+                        $validated['model_id'] ?? null,
+                        $validated['title'] ?? 'Untitled',
+                        $fileSize,
+                        $videoUid
+                    );
+                    $uploadJobId = $uploadJob->id;
+                }
+
                 return response()->json([
                     'message' => 'TUS upload endpoint created successfully',
                     'tus_endpoint' => $result['tus_endpoint'],
-                    'video_uid' => $result['uid'] ?? null,
+                    'video_uid' => $videoUid,
+                    'upload_job_id' => $uploadJobId,
                     'upload_type' => 'tus',
                     'file_size' => $fileSize,
                     'max_duration_seconds' => $maxDuration,
                     'warning' => 'Only call this endpoint once per upload. Reuse the tus_endpoint for all chunks.',
-                    'note' => $maxDuration 
+                    'note' => $maxDuration
                         ? "max_duration_seconds set to {$maxDuration} seconds. Only set this if you know the actual video duration."
                         : 'max_duration_seconds not set. Cloudflare will determine duration from the uploaded file.',
                     'instructions' => [
@@ -195,6 +216,9 @@ class CloudflareController extends Controller
                             ],
                             'response' => 'Returns Upload-Offset and Upload-Length headers',
                         ],
+                        'after_upload' => [
+                            'note' => 'After upload completes, call POST /api/admin/cloudflare/upload-complete with video_uid to trigger processing status tracking',
+                        ],
                     ],
                 ], 201);
             }
@@ -211,16 +235,32 @@ class CloudflareController extends Controller
         $result = $this->cloudflare->createDirectUploadUrl($maxDuration, $title);
 
         if ($result) {
+            // Create upload job for tracking
+            $uploadJobId = null;
+            $videoUid = $result['uid'];
+            if ($videoUid) {
+                $uploadJob = $this->uploadJobService->createDirectUploadJob(
+                    $validated['model_type'] ?? 'video',
+                    $validated['model_id'] ?? null,
+                    $validated['title'] ?? 'Untitled',
+                    $fileSize
+                );
+                $uploadJob->update(['cloudflare_uid' => $videoUid]);
+                $uploadJobId = $uploadJob->id;
+            }
+
             return response()->json([
                 'message' => 'Direct upload URL created successfully',
                 'upload_url' => $result['uploadURL'],
-                'video_uid' => $result['uid'],
+                'video_uid' => $videoUid,
+                'upload_job_id' => $uploadJobId,
                 'upload_type' => 'direct',
                 'instructions' => [
                     'method' => 'POST',
                     'url' => $result['uploadURL'],
                     'body' => 'Send the video file as multipart/form-data with field name "file"',
                     'note' => 'Upload directly from your frontend to this URL to bypass PHP file size limits',
+                    'after_upload' => 'After upload completes, call POST /api/admin/cloudflare/upload-complete with video_uid to trigger processing status tracking',
                 ],
             ], 201);
         }
@@ -353,7 +393,15 @@ class CloudflareController extends Controller
 
         $transferId = $transferResult['transfer']['id'];
 
-        // Step 2: Dispatch background job to handle the rest automatically
+        // Step 2: Create upload job for progress tracking
+        $uploadJob = $this->uploadJobService->createMagnetUploadJob(
+            'video', // Default to video, will be updated when we know which model
+            null,
+            $transferId,
+            $validated['title']
+        );
+
+        // Step 3: Dispatch background job to handle the rest automatically
         UploadVideoFromPutio::dispatch(
             $transferId,
             $validated['title'],
@@ -367,7 +415,8 @@ class CloudflareController extends Controller
                 'name' => $transferResult['transfer']['name'],
                 'status' => $transferResult['transfer']['status'],
             ],
-            'note' => 'Check logs for progress. Video will appear in Cloudflare Stream dashboard when complete.',
+            'upload_job_id' => $uploadJob->id,
+            'note' => 'Use /api/admin/cloudflare/upload-jobs to track all upload progress.',
         ], 202);
     }
 
@@ -485,9 +534,43 @@ class CloudflareController extends Controller
             ], 404);
         }
 
+        // Check if there's a video/episode with this transfer ID
+        $tempUid = 'processing_transfer_' . $transferId;
+        $video = \App\Models\Video::where('cloudflare_video_uid', $tempUid)->first();
+        $episode = \App\Models\Episode::where('cloudflare_video_uid', $tempUid)->first();
+
+        $cloudflareStatus = null;
+        if ($video && $video->cloudflare_video_uid !== $tempUid) {
+            // Video has been updated with actual Cloudflare UID
+            $cloudflareVideo = $this->cloudflare->getVideo($video->cloudflare_video_uid);
+            if ($cloudflareVideo) {
+                $cloudflareStatus = [
+                    'uid' => $video->cloudflare_video_uid,
+                    'status' => $cloudflareVideo['status']['state'] ?? 'unknown',
+                    'ready' => $cloudflareVideo['readyToStream'] ?? false,
+                    'progress' => $this->calculateCloudflareProgress($cloudflareVideo),
+                ];
+            }
+        } elseif ($episode && $episode->cloudflare_video_uid !== $tempUid) {
+            // Episode has been updated with actual Cloudflare UID
+            $cloudflareVideo = $this->cloudflare->getVideo($episode->cloudflare_video_uid);
+            if ($cloudflareVideo) {
+                $cloudflareStatus = [
+                    'uid' => $episode->cloudflare_video_uid,
+                    'status' => $cloudflareVideo['status']['state'] ?? 'unknown',
+                    'ready' => $cloudflareVideo['readyToStream'] ?? false,
+                    'progress' => $this->calculateCloudflareProgress($cloudflareVideo),
+                ];
+            }
+        }
+
+        // Determine overall workflow status
+        $workflowStatus = $this->determineWorkflowStatus($transfer, $cloudflareStatus);
+
         return response()->json([
             'message' => 'Transfer status retrieved',
-            'transfer' => [
+            'workflow_status' => $workflowStatus,
+            'putio' => [
                 'id' => $transfer['id'],
                 'name' => $transfer['name'],
                 'status' => $transfer['status'],
@@ -496,7 +579,80 @@ class CloudflareController extends Controller
                 'downloaded' => $transfer['downloaded'] ?? null,
                 'file_id' => $transfer['file_id'] ?? null,
             ],
+            'cloudflare' => $cloudflareStatus,
+            'progress' => [
+                'putio_progress' => $transfer['percent_done'] ?? 0,
+                'cloudflare_progress' => $cloudflareStatus ? $cloudflareStatus['progress'] : 0,
+                'overall_progress' => $this->calculateOverallProgress($transfer, $cloudflareStatus),
+            ],
         ]);
+    }
+
+    /**
+     * Calculate Cloudflare processing progress based on status
+     */
+    protected function calculateCloudflareProgress($cloudflareVideo): int
+    {
+        $state = $cloudflareVideo['status']['state'] ?? 'unknown';
+
+        $progressMap = [
+            'uploading' => 10,
+            'pendingupload' => 5,
+            'queued' => 20,
+            'downloading' => 15,
+            'inprogress' => 50,
+            'ready' => 100,
+            'error' => 0,
+        ];
+
+        return $progressMap[$state] ?? 0;
+    }
+
+    /**
+     * Calculate overall workflow progress
+     */
+    protected function calculateOverallProgress($transfer, $cloudflareStatus): int
+    {
+        $putioProgress = $transfer['percent_done'] ?? 0;
+
+        // Put.io download is 50% of the workflow
+        $putioWeight = 50;
+
+        // Cloudflare upload/processing is 50% of the workflow
+        $cloudflareWeight = 50;
+        $cloudflareProgress = $cloudflareStatus ? $cloudflareStatus['progress'] : 0;
+
+        // If Put.io is not completed, only count Put.io progress
+        if ($transfer['status'] !== 'COMPLETED') {
+            return (int)($putioProgress * ($putioWeight / 100));
+        }
+
+        // If Put.io is completed, count both
+        return (int)(($putioWeight) + ($cloudflareProgress * ($cloudflareWeight / 100)));
+    }
+
+    /**
+     * Determine overall workflow status
+     */
+    protected function determineWorkflowStatus($transfer, $cloudflareStatus): string
+    {
+        if ($transfer['status'] === 'ERROR' || ($cloudflareStatus && $cloudflareStatus['status'] === 'error')) {
+            return 'error';
+        }
+
+        if ($cloudflareStatus && $cloudflareStatus['ready']) {
+            return 'completed';
+        }
+
+        if ($cloudflareStatus) {
+            return 'cloudflare_processing';
+        }
+
+        if ($transfer['status'] === 'COMPLETED') {
+            return 'uploading_to_cloudflare';
+        }
+
+        return 'downloading_from_putio';
     }
 
     /**
@@ -545,16 +701,30 @@ class CloudflareController extends Controller
     /**
      * Check TUS upload progress/offset (Admin only).
      * Use this to check current upload offset and resume from the correct position.
+     * Also updates the upload job progress if upload_job_id is provided.
      */
     public function checkTusUploadProgress(Request $request)
     {
         $validated = $request->validate([
             'tus_endpoint' => 'required|url',
+            'upload_job_id' => 'nullable|integer',
         ]);
 
         $result = $this->cloudflare->checkTusUploadOffset($validated['tus_endpoint']);
 
         if ($result) {
+            // Update upload job progress if provided
+            if (isset($validated['upload_job_id'])) {
+                $uploadJob = \App\Models\UploadJob::find($validated['upload_job_id']);
+                if ($uploadJob && $uploadJob->isInProgress()) {
+                    $uploadJob->update([
+                        'bytes_transferred' => $result['upload_offset'],
+                        'bytes_total' => $result['upload_length'],
+                        'progress_percent' => $result['progress_percent'],
+                    ]);
+                }
+            }
+
             return response()->json([
                 'message' => 'TUS upload progress retrieved',
                 'upload_offset' => $result['upload_offset'],
@@ -620,6 +790,133 @@ class CloudflareController extends Controller
             ],
             'meta' => $video['meta'] ?? null,
             'note' => $ready ? 'Video is ready to stream' : 'Video is still processing. Poll this endpoint to check progress.',
+        ]);
+    }
+
+    /**
+     * Notify that a direct/TUS upload has completed (Admin only).
+     * Call this endpoint after frontend finishes uploading to Cloudflare.
+     * This will update the upload job status and start monitoring Cloudflare processing.
+     */
+    public function notifyUploadComplete(Request $request)
+    {
+        $validated = $request->validate([
+            'video_uid' => 'required|string',
+            'model_type' => 'nullable|string|in:video,episode',
+            'model_id' => 'nullable|integer',
+        ]);
+
+        $videoUid = $validated['video_uid'];
+        $modelType = $validated['model_type'] ?? null;
+        $modelId = $validated['model_id'] ?? null;
+
+        // Find the upload job by cloudflare UID
+        $uploadJob = $this->uploadJobService->findByCloudflareUid($videoUid);
+
+        if (!$uploadJob) {
+            return response()->json([
+                'message' => 'Upload job not found for this video UID',
+                'video_uid' => $videoUid,
+            ], 404);
+        }
+
+        // Update model association if provided
+        if ($modelType && $modelId) {
+            $uploadJob->update([
+                'model_type' => $modelType,
+                'model_id' => $modelId,
+            ]);
+
+            // Also update the Video/Episode model with cloudflare_video_uid
+            if ($modelType === 'video') {
+                $video = \App\Models\Video::find($modelId);
+                if ($video && (!$video->cloudflare_video_uid || str_starts_with($video->cloudflare_video_uid, 'processing_'))) {
+                    $video->update([
+                        'cloudflare_video_uid' => $videoUid,
+                        'status' => 'processing',
+                    ]);
+                }
+            } elseif ($modelType === 'episode') {
+                $episode = \App\Models\Episode::find($modelId);
+                if ($episode && (!$episode->cloudflare_video_uid || str_starts_with($episode->cloudflare_video_uid, 'processing_'))) {
+                    $episode->update([
+                        'cloudflare_video_uid' => $videoUid,
+                        'status' => 'processing',
+                    ]);
+                }
+            }
+        }
+
+        // Check current video status from Cloudflare
+        $video = $this->cloudflare->getVideo($videoUid);
+
+        if (!$video) {
+            return response()->json([
+                'message' => 'Video not found on Cloudflare. Upload may still be in progress.',
+                'video_uid' => $videoUid,
+                'upload_job_id' => $uploadJob->id,
+                'status' => 'uploading',
+            ], 202);
+        }
+
+        $state = $video['status']['state'] ?? 'unknown';
+        $ready = $video['readyToStream'] ?? false;
+
+        if ($ready && $state === 'ready') {
+            // Video is already ready
+            $uploadJob->markAsCompleted();
+
+            // Update Video/Episode model to ready status
+            if ($modelType && $modelId) {
+                $duration = $video['duration'] ?? null;
+                if ($modelType === 'video') {
+                    $videoModel = \App\Models\Video::find($modelId);
+                    if ($videoModel) {
+                        $videoModel->update([
+                            'status' => 'ready',
+                            'is_published' => true,
+                            'duration' => $duration ? (int)$duration : $videoModel->duration,
+                        ]);
+                    }
+                } elseif ($modelType === 'episode') {
+                    $episode = \App\Models\Episode::find($modelId);
+                    if ($episode) {
+                        $episode->update([
+                            'status' => 'ready',
+                            'is_published' => true,
+                            'duration' => $duration ? (int)$duration : $episode->duration,
+                        ]);
+                    }
+                }
+            }
+
+            return response()->json([
+                'message' => 'Video is ready to stream',
+                'video_uid' => $videoUid,
+                'upload_job_id' => $uploadJob->id,
+                'status' => 'completed',
+                'duration' => $video['duration'] ?? null,
+            ]);
+        }
+
+        // Mark as processing and start monitoring
+        $uploadJob->markAsProcessing($videoUid);
+
+        // Start transcoding status monitoring
+        if ($modelType && $modelId) {
+            \App\Jobs\CheckVideoTranscodingStatus::dispatch($modelType, $modelId, $videoUid)
+                ->delay(now()->addMinutes(2));
+        }
+
+        return response()->json([
+            'message' => 'Upload complete, video is now processing on Cloudflare',
+            'video_uid' => $videoUid,
+            'upload_job_id' => $uploadJob->id,
+            'status' => 'processing',
+            'cloudflare_state' => $state,
+            'note' => $modelType && $modelId
+                ? 'Transcoding status will be monitored automatically.'
+                : 'Provide model_type and model_id to enable automatic transcoding monitoring.',
         ]);
     }
 
@@ -736,5 +1033,149 @@ class CloudflareController extends Controller
         $srtContent = file_get_contents($srtPath);
         $vttContent = "WEBVTT\n\n" . str_replace(',', '.', $srtContent);
         file_put_contents($vttPath, $vttContent);
+    }
+
+    /**
+     * List all upload jobs with progress tracking
+     */
+    public function listUploadJobs(Request $request)
+    {
+        $status = $request->query('status'); // active, completed, failed, all
+        $perPage = $request->query('per_page', 20);
+
+        $query = UploadJob::query()->orderBy('created_at', 'desc');
+
+        if ($status === 'active') {
+            $query->active();
+        } elseif ($status === 'completed') {
+            $query->completed();
+        } elseif ($status === 'failed') {
+            $query->failed();
+        }
+
+        $jobs = $query->paginate($perPage);
+
+        return response()->json([
+            'message' => 'Upload jobs retrieved',
+            'data' => $jobs->map(function ($job) {
+                return [
+                    'id' => $job->id,
+                    'title' => $job->title,
+                    'model_type' => $job->model_type,
+                    'model_id' => $job->model_id,
+                    'upload_method' => $job->upload_method,
+                    'status' => $job->status,
+                    'status_label' => $job->status_label,
+                    'current_phase' => $job->current_phase,
+                    'phase_label' => $job->phase_label,
+                    'progress_percent' => $job->progress_percent,
+                    'bytes_transferred' => $job->bytes_transferred,
+                    'bytes_total' => $job->bytes_total,
+                    'transfer_id' => $job->transfer_id,
+                    'cloudflare_uid' => $job->cloudflare_uid,
+                    'error_message' => $job->error_message,
+                    'started_at' => $job->started_at?->toIso8601String(),
+                    'completed_at' => $job->completed_at?->toIso8601String(),
+                    'created_at' => $job->created_at->toIso8601String(),
+                ];
+            }),
+            'pagination' => [
+                'total' => $jobs->total(),
+                'per_page' => $jobs->perPage(),
+                'current_page' => $jobs->currentPage(),
+                'last_page' => $jobs->lastPage(),
+            ],
+        ]);
+    }
+
+    /**
+     * Get a specific upload job by ID
+     */
+    public function getUploadJob($id)
+    {
+        $job = UploadJob::find($id);
+
+        if (!$job) {
+            return response()->json([
+                'message' => 'Upload job not found',
+            ], 404);
+        }
+
+        // If job is for a magnet upload, also fetch Put.io status
+        $putioStatus = null;
+        if ($job->transfer_id && $job->isInProgress()) {
+            $putioStatus = $this->putio->getTransferStatus($job->transfer_id);
+        }
+
+        // If job has a Cloudflare UID, fetch Cloudflare status
+        $cloudflareStatus = null;
+        if ($job->cloudflare_uid) {
+            $cloudflareVideo = $this->cloudflare->getVideo($job->cloudflare_uid);
+            if ($cloudflareVideo) {
+                $cloudflareStatus = [
+                    'state' => $cloudflareVideo['status']['state'] ?? 'unknown',
+                    'ready' => $cloudflareVideo['readyToStream'] ?? false,
+                    'duration' => $cloudflareVideo['duration'] ?? null,
+                ];
+            }
+        }
+
+        return response()->json([
+            'message' => 'Upload job retrieved',
+            'data' => [
+                'id' => $job->id,
+                'title' => $job->title,
+                'model_type' => $job->model_type,
+                'model_id' => $job->model_id,
+                'upload_method' => $job->upload_method,
+                'status' => $job->status,
+                'status_label' => $job->status_label,
+                'current_phase' => $job->current_phase,
+                'phase_label' => $job->phase_label,
+                'progress_percent' => $job->progress_percent,
+                'bytes_transferred' => $job->bytes_transferred,
+                'bytes_total' => $job->bytes_total,
+                'transfer_id' => $job->transfer_id,
+                'cloudflare_uid' => $job->cloudflare_uid,
+                'error_message' => $job->error_message,
+                'started_at' => $job->started_at?->toIso8601String(),
+                'completed_at' => $job->completed_at?->toIso8601String(),
+                'created_at' => $job->created_at->toIso8601String(),
+            ],
+            'putio' => $putioStatus ? [
+                'status' => $putioStatus['status'],
+                'percent_done' => $putioStatus['percent_done'] ?? 0,
+                'size' => $putioStatus['size'] ?? null,
+                'downloaded' => $putioStatus['downloaded'] ?? null,
+            ] : null,
+            'cloudflare' => $cloudflareStatus,
+        ]);
+    }
+
+    /**
+     * Get active upload jobs only (for dashboard widgets)
+     */
+    public function getActiveUploadJobs()
+    {
+        $jobs = $this->uploadJobService->getActiveJobs();
+
+        return response()->json([
+            'message' => 'Active upload jobs retrieved',
+            'count' => $jobs->count(),
+            'data' => $jobs->map(function ($job) {
+                return [
+                    'id' => $job->id,
+                    'title' => $job->title,
+                    'upload_method' => $job->upload_method,
+                    'status' => $job->status,
+                    'status_label' => $job->status_label,
+                    'phase_label' => $job->phase_label,
+                    'progress_percent' => $job->progress_percent,
+                    'bytes_transferred' => $job->bytes_transferred,
+                    'bytes_total' => $job->bytes_total,
+                    'created_at' => $job->created_at->toIso8601String(),
+                ];
+            }),
+        ]);
     }
 }

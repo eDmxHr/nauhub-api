@@ -77,18 +77,28 @@ class EpisodeController extends Controller
     $validated['is_published'] = $validated['is_published'] ?? false;
     $validated['view_count'] = 0;
 
+    // Note: cloudflare_video_uid can be added later via update or file upload endpoints
+
+    $episode = Episode::create($validated);
+
     // If magnet URL is provided, initiate upload in background
+    $uploadJobId = null;
     if ($magnetUrl) {
       $torrentService = app(\App\Services\TorrentToStreamService::class);
 
       $result = $torrentService->uploadFromMagnet($magnetUrl, [
         'name' => $validated['title'],
-      ]);
+      ], 'episode', $episode->id);
 
       if ($result['success']) {
         // Store transfer ID temporarily (will be updated by background job with actual UID)
-        $validated['cloudflare_video_uid'] = 'processing_transfer_' . $result['transfer_id'];
+        $episode->update([
+          'cloudflare_video_uid' => 'processing_transfer_' . $result['transfer_id'],
+        ]);
+        $uploadJobId = $result['upload_job_id'] ?? null;
       } else {
+        // Delete the episode if upload initiation failed
+        $episode->delete();
         return response()->json([
           'message' => 'Failed to initiate episode upload',
           'error' => $result['message'] ?? 'Unknown error',
@@ -96,13 +106,10 @@ class EpisodeController extends Controller
       }
     }
 
-    // Note: cloudflare_video_uid can be added later via update or file upload endpoints
-
-    $episode = Episode::create($validated);
-
     return response()->json([
       'message' => 'Episode created successfully' . ($magnetUrl ? '. Upload processing in background.' : ''),
-      'episode' => $episode,
+      'episode' => $episode->fresh(),
+      'upload_job_id' => $uploadJobId,
     ], 201);
   }
 

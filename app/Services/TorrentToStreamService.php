@@ -14,15 +14,18 @@ class TorrentToStreamService
     protected $putioService;
     protected $cloudflareService;
     protected $subtitleService;
+    protected $uploadJobService;
 
     public function __construct(
         PutioService $putioService,
         CloudflareStreamService $cloudflareService,
-        SubtitleService $subtitleService
+        SubtitleService $subtitleService,
+        UploadJobService $uploadJobService
     ) {
         $this->putioService = $putioService;
         $this->cloudflareService = $cloudflareService;
         $this->subtitleService = $subtitleService;
+        $this->uploadJobService = $uploadJobService;
     }
 
     /**
@@ -30,19 +33,37 @@ class TorrentToStreamService
      *
      * @param string $magnetUrl
      * @param array $metadata Video metadata
+     * @param string $modelType 'video' or 'episode'
+     * @param int|null $modelId The model ID (set after creation if not known yet)
      * @return array
      */
-    public function uploadFromMagnet(string $magnetUrl, array $metadata = []): array
+    public function uploadFromMagnet(string $magnetUrl, array $metadata = [], string $modelType = 'video', ?int $modelId = null): array
     {
         // Add transfer to Put.io (without waiting for completion)
         $result = $this->processToStream($magnetUrl, $metadata, false);
 
         if ($result['success']) {
+            $transferId = $result['transfer_id'];
+            $title = $metadata['name'] ?? 'Untitled';
+
+            // Create upload job for progress tracking
+            $uploadJob = $this->uploadJobService->createMagnetUploadJob(
+                $modelType,
+                $modelId,
+                $transferId,
+                $title
+            );
+
+            // Return the upload job ID so it can be linked to the model after creation
+            $result['upload_job_id'] = $uploadJob->id;
+
             // Dispatch background job with 30 second delay to allow transfer to start
             \App\Jobs\UploadVideoFromPutio::dispatch(
-                $result['transfer_id'],
-                $metadata['name'] ?? 'Untitled',
-                $metadata['description'] ?? null
+                $transferId,
+                $title,
+                $metadata['description'] ?? null,
+                $modelType,
+                $modelId
             )->delay(now()->addSeconds(30));
         }
 
@@ -143,28 +164,79 @@ class TorrentToStreamService
      *
      * @param int $transferId
      * @param array $metadata
+     * @param \App\Models\UploadJob|null $uploadJob
      * @return array
      */
-    public function processCompletedTransfer(int $transferId, array $metadata = []): array
+    public function processCompletedTransfer(int $transferId, array $metadata = [], ?\App\Models\UploadJob $uploadJob = null): array
     {
+        // Find or create upload job for progress tracking
+        if (!$uploadJob) {
+            $uploadJob = $this->uploadJobService->findByTransferId($transferId);
+        }
+        Log::info('📥 [MAGNET UPLOAD] Step 1: Checking Put.io transfer status', [
+            'transfer_id' => $transferId,
+        ]);
+
         // Get transfer details
         $transfer = $this->putioService->getTransferStatus($transferId);
 
-        if (!$transfer || $transfer['status'] !== 'COMPLETED') {
+        if (!$transfer) {
+            Log::error('❌ [MAGNET UPLOAD] Transfer not found', ['transfer_id' => $transferId]);
             return [
                 'success' => false,
-                'message' => 'Transfer not completed yet',
-                'status' => $transfer['status'] ?? 'unknown',
+                'message' => 'Transfer not found',
+                'status' => 'unknown',
             ];
         }
 
+        Log::info('📊 [MAGNET UPLOAD] Put.io transfer status', [
+            'transfer_id' => $transferId,
+            'status' => $transfer['status'],
+            'percent_done' => $transfer['percent_done'] ?? 0,
+            'name' => $transfer['name'] ?? 'Unknown',
+        ]);
+
+        // Wait for Put.io transfer to complete with progress tracking
+        if ($transfer['status'] !== 'COMPLETED' && $transfer['status'] !== 'SEEDING') {
+            Log::info('⏳ [MAGNET UPLOAD] Waiting for Put.io transfer to complete...', [
+                'transfer_id' => $transferId,
+            ]);
+
+            $waitResult = $this->waitForTransferWithProgress($transferId, $uploadJob);
+
+            if (!$waitResult['success']) {
+                if ($uploadJob) {
+                    $uploadJob->markAsFailed($waitResult['message']);
+                }
+                return [
+                    'success' => false,
+                    'message' => $waitResult['message'],
+                    'status' => $waitResult['status'] ?? 'unknown',
+                ];
+            }
+
+            // Update transfer with completed data
+            $transfer = $this->putioService->getTransferStatus($transferId);
+        }
+
+        Log::info('✅ [MAGNET UPLOAD] Step 2: Put.io transfer completed', [
+            'transfer_id' => $transferId,
+            'file_id' => $transfer['file_id'],
+        ]);
+
         $fileId = $transfer['file_id'];
+
+        Log::info('📁 [MAGNET UPLOAD] Step 3: Getting file information', [
+            'file_id' => $fileId,
+        ]);
 
         // Check if it's a folder and find the actual video file
         $fileInfo = $this->putioService->getFile($fileId);
 
         if ($fileInfo['content_type'] === 'application/x-directory') {
-            Log::info('Transfer is a folder, finding video file inside', ['folder_id' => $fileId]);
+            Log::info('📂 [MAGNET UPLOAD] Transfer is a folder, finding video file inside', [
+                'folder_id' => $fileId,
+            ]);
 
             $files = $this->putioService->listFiles($fileId);
 
@@ -175,6 +247,7 @@ class TorrentToStreamService
                 ->first();
 
             if (!$videoFile) {
+                Log::error('❌ [MAGNET UPLOAD] No video file found in folder', ['folder_id' => $fileId]);
                 return [
                     'success' => false,
                     'step' => 'find_video_file',
@@ -183,17 +256,22 @@ class TorrentToStreamService
             }
 
             $fileId = $videoFile['id'];
-            Log::info('Found video file in folder', [
+            Log::info('✅ [MAGNET UPLOAD] Found video file in folder', [
                 'video_file_id' => $fileId,
                 'name' => $videoFile['name'],
                 'size' => $videoFile['size'],
             ]);
         }
 
+        Log::info('🔗 [MAGNET UPLOAD] Step 4: Getting Put.io download URL', [
+            'file_id' => $fileId,
+        ]);
+
         // Continue with steps 3-5 from processToStream()
         $downloadUrl = $this->putioService->getFileUrl($fileId);
 
         if (!$downloadUrl) {
+            Log::error('❌ [MAGNET UPLOAD] Could not get Put.io download URL', ['file_id' => $fileId]);
             return [
                 'success' => false,
                 'step' => 'putio_get_url',
@@ -201,12 +279,19 @@ class TorrentToStreamService
             ];
         }
 
-        // Use direct upload instead of URL upload to avoid Put.io rate limiting
-        Log::info('Using direct upload method', ['file_id' => $fileId]);
+        Log::info('✅ [MAGNET UPLOAD] Got download URL, starting upload to Cloudflare', [
+            'file_id' => $fileId,
+            'method' => 'direct_upload',
+        ]);
 
-        $streamResult = $this->uploadFromPutioToCloudflare($downloadUrl, $fileId, $metadata);
+        // Use direct upload instead of URL upload to avoid Put.io rate limiting
+        $streamResult = $this->uploadFromPutioToCloudflare($downloadUrl, $fileId, $metadata, $uploadJob);
 
         if (!$streamResult) {
+            Log::error('❌ [MAGNET UPLOAD] Failed to upload to Cloudflare Stream', ['file_id' => $fileId]);
+            if ($uploadJob) {
+                $uploadJob->markAsFailed('Failed to upload to Cloudflare Stream');
+            }
             return [
                 'success' => false,
                 'step' => 'cloudflare_upload',
@@ -215,6 +300,18 @@ class TorrentToStreamService
         }
 
         $videoUid = $streamResult['uid'];
+
+        // Mark upload job as processing (Cloudflare transcoding)
+        if ($uploadJob) {
+            $uploadJob->markAsProcessing($videoUid);
+        }
+
+        Log::info('🎉 [MAGNET UPLOAD] Successfully uploaded to Cloudflare', [
+            'transfer_id' => $transferId,
+            'file_id' => $fileId,
+            'cloudflare_uid' => $videoUid,
+            'status' => $streamResult['status']['state'] ?? 'unknown',
+        ]);
 
         return [
             'success' => true,
@@ -230,9 +327,10 @@ class TorrentToStreamService
      * @param string $downloadUrl
      * @param int $fileId
      * @param array $metadata
+     * @param \App\Models\UploadJob|null $uploadJob
      * @return array|null
      */
-    protected function uploadFromPutioToCloudflare(string $downloadUrl, int $fileId, array $metadata = [])
+    protected function uploadFromPutioToCloudflare(string $downloadUrl, int $fileId, array $metadata = [], ?\App\Models\UploadJob $uploadJob = null)
     {
         try {
             // Get file info from Put.io
@@ -245,21 +343,46 @@ class TorrentToStreamService
             $fileName = $fileInfo['name'];
             $fileSize = $fileInfo['size'];
 
-            Log::info('Starting direct upload to Cloudflare', [
+            Log::info('⬇️ [MAGNET UPLOAD] Step 5: Starting download from Put.io', [
                 'file_name' => $fileName,
                 'file_size' => $fileSize,
+                'file_id' => $fileId,
             ]);
+
+            // Mark as downloading from Put.io to server
+            if ($uploadJob) {
+                $uploadJob->markAsDownloading($fileSize);
+            }
 
             // Download file from Put.io in chunks and stream to Cloudflare
             $tempFile = tempnam(sys_get_temp_dir(), 'putio_');
 
-            // Download file from Put.io
+            // Download file from Put.io with progress tracking
             $ch = curl_init($downloadUrl);
             $fp = fopen($tempFile, 'w+');
 
             curl_setopt($ch, CURLOPT_FILE, $fp);
             curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
             curl_setopt($ch, CURLOPT_TIMEOUT, 3600); // 1 hour timeout
+
+            // Track download progress
+            if ($uploadJob) {
+                $lastUpdate = 0;
+                curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+                curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($resource, $downloadSize, $downloaded, $uploadSize, $uploaded) use ($uploadJob, &$lastUpdate, $fileSize) {
+                    $total = $downloadSize > 0 ? $downloadSize : $fileSize;
+                    if ($total > 0 && $downloaded > 0) {
+                        // Only update every 5% to avoid too many DB writes
+                        $percent = (int)(($downloaded / $total) * 100);
+                        if ($percent >= $lastUpdate + 5 || $percent === 100) {
+                            $uploadJob->updateProgress($percent, (int)$downloaded, (int)$total);
+                            $lastUpdate = $percent;
+                        }
+                    }
+                    return 0; // Return 0 to continue download
+                });
+            }
+
             curl_exec($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
@@ -271,13 +394,21 @@ class TorrentToStreamService
                 return null;
             }
 
-            Log::info('File downloaded from Put.io, uploading to Cloudflare', [
+            $actualFileSize = filesize($tempFile);
+
+            Log::info('✅ [MAGNET UPLOAD] Step 6: File downloaded from Put.io, uploading to Cloudflare', [
                 'temp_file' => $tempFile,
-                'size' => filesize($tempFile),
+                'size' => $actualFileSize,
+                'file_name' => $fileName,
             ]);
 
-            // Upload to Cloudflare Stream using multipart form data
-            $result = $this->cloudflareService->uploadFromFile($tempFile, $fileName, $metadata);
+            // Mark as uploading to Cloudflare
+            if ($uploadJob) {
+                $uploadJob->markAsUploading($actualFileSize);
+            }
+
+            // Upload to Cloudflare Stream using multipart form data (with progress tracking)
+            $result = $this->cloudflareService->uploadFromFile($tempFile, $fileName, $metadata, $uploadJob);
 
             // Clean up temp file
             unlink($tempFile);
@@ -364,5 +495,86 @@ class TorrentToStreamService
         }
 
         return $status;
+    }
+
+    /**
+     * Wait for Put.io transfer to complete with progress tracking
+     *
+     * @param int $transferId
+     * @param \App\Models\UploadJob|null $uploadJob
+     * @param int $maxAttempts Maximum polling attempts (default 360 = 1 hour with 10 sec intervals)
+     * @param int $sleepSeconds Seconds between polling (default 10)
+     * @return array
+     */
+    protected function waitForTransferWithProgress(int $transferId, ?\App\Models\UploadJob $uploadJob = null, int $maxAttempts = 360, int $sleepSeconds = 10): array
+    {
+        $attempts = 0;
+
+        while ($attempts < $maxAttempts) {
+            $transfer = $this->putioService->getTransferStatus($transferId);
+
+            if (!$transfer) {
+                return [
+                    'success' => false,
+                    'message' => 'Transfer not found',
+                    'status' => 'unknown',
+                ];
+            }
+
+            // Update progress in upload job
+            if ($uploadJob) {
+                $this->uploadJobService->syncPutioStatus($uploadJob, $transfer);
+            }
+
+            // Check if transfer is completed
+            if ($transfer['status'] === 'COMPLETED' || $transfer['status'] === 'SEEDING') {
+                Log::info('✅ [MAGNET UPLOAD] Put.io transfer completed', [
+                    'transfer_id' => $transferId,
+                    'file_id' => $transfer['file_id'],
+                    'attempts' => $attempts,
+                ]);
+
+                return [
+                    'success' => true,
+                    'file_id' => $transfer['file_id'],
+                    'name' => $transfer['name'],
+                    'size' => $transfer['size'],
+                ];
+            }
+
+            // Check if transfer failed
+            if ($transfer['status'] === 'ERROR') {
+                $errorMessage = $transfer['error_message'] ?? 'Unknown error';
+                Log::error('❌ [MAGNET UPLOAD] Put.io transfer failed', [
+                    'transfer_id' => $transferId,
+                    'error' => $errorMessage,
+                ]);
+
+                return [
+                    'success' => false,
+                    'message' => 'Transfer failed: ' . $errorMessage,
+                    'status' => 'ERROR',
+                ];
+            }
+
+            // Log progress every 6 attempts (1 minute)
+            if ($attempts % 6 === 0) {
+                Log::info('⏳ [MAGNET UPLOAD] Waiting for Put.io transfer...', [
+                    'transfer_id' => $transferId,
+                    'status' => $transfer['status'],
+                    'percent_done' => $transfer['percent_done'] ?? 0,
+                    'attempts' => $attempts,
+                ]);
+            }
+
+            $attempts++;
+            sleep($sleepSeconds);
+        }
+
+        return [
+            'success' => false,
+            'message' => 'Transfer timeout - still downloading after ' . ($maxAttempts * $sleepSeconds / 60) . ' minutes',
+            'status' => 'TIMEOUT',
+        ];
     }
 }

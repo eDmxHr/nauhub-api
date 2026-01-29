@@ -258,6 +258,15 @@ Route::middleware(['auth:sanctum', 'admin'])->prefix('admin')->group(function ()
     Route::post('/complete-upload/{transferId}', [CloudflareController::class, 'completeUpload']); // Step 3: Upload to Cloudflare when Put.io is done
     Route::get('/video/{videoUid}', [CloudflareController::class, 'getVideo']); // Get video details
     Route::delete('/video/{videoUid}', [CloudflareController::class, 'deleteVideo']); // Delete video
+
+    // Upload job progress tracking
+    Route::get('/upload-jobs', [CloudflareController::class, 'listUploadJobs']); // List all upload jobs with pagination
+    Route::get('/upload-jobs/active', [CloudflareController::class, 'getActiveUploadJobs']); // Get only active upload jobs
+    Route::get('/upload-jobs/{id}', [CloudflareController::class, 'getUploadJob']); // Get specific upload job details
+
+    // Upload status updates
+    Route::post('/upload-complete', [CloudflareController::class, 'notifyUploadComplete']); // Notify that direct/TUS upload completed
+    Route::get('/upload-status/{videoUid}', [CloudflareController::class, 'getUploadStatus']); // Get upload/processing status
   });
 
   // Admin: User management

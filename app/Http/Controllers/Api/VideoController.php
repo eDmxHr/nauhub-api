@@ -220,25 +220,6 @@ class VideoController extends Controller
         $validated['is_featured'] = $validated['is_featured'] ?? false;
         $validated['is_trending'] = $validated['is_trending'] ?? false;
 
-        // For movies with magnet URL, initiate upload in background
-        if ($validated['type'] === 'movie' && $magnetUrl) {
-            $torrentService = app(\App\Services\TorrentToStreamService::class);
-
-            $result = $torrentService->uploadFromMagnet($magnetUrl, [
-                'name' => $validated['title'],
-            ]);
-
-            if ($result['success']) {
-                // Store transfer ID temporarily (will be updated by background job with actual UID)
-                $validated['cloudflare_video_uid'] = 'processing_transfer_' . $result['transfer_id'];
-            } else {
-                return response()->json([
-                    'message' => 'Failed to initiate video upload',
-                    'error' => $result['message'] ?? 'Unknown error',
-                ], 500);
-            }
-        }
-
         // Note: cloudflare_video_uid can be added later via update or file upload endpoints
 
         $video = Video::create($validated);
@@ -251,12 +232,40 @@ class VideoController extends Controller
             $video->genres()->attach($genreIds);
         }
 
+        // For movies with magnet URL, initiate upload in background
+        $uploadJobId = null;
+        if ($validated['type'] === 'movie' && $magnetUrl) {
+            $torrentService = app(\App\Services\TorrentToStreamService::class);
+
+            $result = $torrentService->uploadFromMagnet($magnetUrl, [
+                'name' => $validated['title'],
+            ], 'video', $video->id);
+
+            if ($result['success']) {
+                // Store transfer ID temporarily (will be updated by background job with actual UID)
+                $video->update([
+                    'cloudflare_video_uid' => 'processing_transfer_' . $result['transfer_id'],
+                ]);
+                $uploadJobId = $result['upload_job_id'] ?? null;
+            } else {
+                // Delete the video if upload initiation failed
+                $video->categories()->detach();
+                $video->genres()->detach();
+                $video->delete();
+                return response()->json([
+                    'message' => 'Failed to initiate video upload',
+                    'error' => $result['message'] ?? 'Unknown error',
+                ], 500);
+            }
+        }
+
         // Load relationships for response
         $video->load(['categories', 'genres']);
 
         return response()->json([
             'message' => 'Video created successfully' . ($magnetUrl ? '. Upload processing in background.' : ''),
-            'video' => $video,
+            'video' => $video->fresh(['categories', 'genres']),
+            'upload_job_id' => $uploadJobId,
         ], 201);
     }
 
