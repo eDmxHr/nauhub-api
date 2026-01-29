@@ -146,7 +146,7 @@ class DashboardController extends Controller
                         'name' => $user->name,
                         'email' => $user->email,
                         'role' => $user->role,
-                        'created_at' => $user->created_at->toISOString(),
+                        'created_at' => $user->created_at?->toISOString(),
                     ];
                 }),
 
@@ -158,14 +158,14 @@ class DashboardController extends Controller
                     return [
                         'id' => $subscription->id,
                         'user' => [
-                            'id' => $subscription->user->id,
-                            'name' => $subscription->user->name,
-                            'email' => $subscription->user->email,
+                            'id' => $subscription->user?->id,
+                            'name' => $subscription->user?->name,
+                            'email' => $subscription->user?->email,
                         ],
                         'plan_type' => $subscription->plan_type,
                         'amount' => (float) $subscription->amount,
                         'status' => $subscription->status,
-                        'created_at' => $subscription->created_at->toISOString(),
+                        'created_at' => $subscription->created_at?->toISOString(),
                     ];
                 }),
 
@@ -178,13 +178,13 @@ class DashboardController extends Controller
                     return [
                         'id' => $payment->id,
                         'user' => [
-                            'id' => $payment->user->id,
-                            'name' => $payment->user->name,
-                            'email' => $payment->user->email,
+                            'id' => $payment->user?->id,
+                            'name' => $payment->user?->name,
+                            'email' => $payment->user?->email,
                         ],
                         'amount' => (float) $payment->amount,
                         'reference_code' => $payment->reference_code,
-                        'created_at' => $payment->created_at->toISOString(),
+                        'created_at' => $payment->created_at?->toISOString(),
                     ];
                 }),
 
@@ -197,7 +197,7 @@ class DashboardController extends Controller
                         'title' => $video->title,
                         'type' => $video->type,
                         'status' => $video->status,
-                        'created_at' => $video->created_at->toISOString(),
+                        'created_at' => $video->created_at?->toISOString(),
                     ];
                 }),
         ];
